@@ -15,80 +15,81 @@ class LineArtScreen extends StatefulWidget {
   State<LineArtScreen> createState() => _LineArtScreenState();
 }
 
-class _LineArtScreenState extends State<LineArtScreen> with TickerProviderStateMixin {
-  late List<AnimationController> controllers;
-  List<LineData> lines = [];
+class _LineArtScreenState extends State<LineArtScreen> with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  List<Line> lines = [];
   final Random rnd = Random();
-  int _version = 0;
+  int _lastHour = -1;
+  int _lastMinute = -1;
 
   @override
   void initState() {
     super.initState();
+    _controller = AnimationController(vsync: this, duration: const Duration(seconds: 24))..repeat();
     _generateLines();
   }
 
   void _generateLines() {
     lines.clear();
-    _version++;
+
+    final size = MediaQuery.of(context).size;
+    final centerX = size.width / 2;
+    final centerY = size.height / 2;
+
+    final safeWidth = size.width * 0.85;
+    final safeHeight = size.height * 0.85;
 
     final hour = widget.currentTime.hour;
     final minute = widget.currentTime.minute;
-    final hour12 = hour % 12 == 0 ? 12 : hour % 12;
 
-    controllers = List.generate(hour12 + minute + 25, (index) {
-      final controller = AnimationController(
-        vsync: this,
-        duration: Duration(seconds: 12 + rnd.nextInt(18)),
-      )..repeat();
-      return controller;
-    });
-
-    // Thick lines = Hour
-    for (int i = 0; i < hour12; i++) {
-      lines.add(LineData(
+    // === THICK LINES = HOUR ===
+    for (int i = 0; i < hour; i++) {
+      lines.add(Line(
+        start: Offset(
+          centerX - safeWidth / 2 + rnd.nextDouble() * safeWidth,
+          centerY - safeHeight / 2 + rnd.nextDouble() * safeHeight,
+        ),
+        length: 100 + rnd.nextDouble() * 380,
+        angle: rnd.nextDouble() * pi * 2,
         thickness: 14.0,
-        length: 100 + rnd.nextDouble() * 400,
-        angle: rnd.nextDouble() * pi * 2,
-        isHour: true,
-        controllerIndex: i,
       ));
     }
 
-    // Thin lines = Minute
+    // === THIN LINES = MINUTE ===
     for (int i = 0; i < minute; i++) {
-      lines.add(LineData(
-        thickness: 1.0,
-        length: 50 + rnd.nextDouble() * 220,
+      lines.add(Line(
+        start: Offset(
+          centerX - safeWidth / 2 + rnd.nextDouble() * safeWidth,
+          centerY - safeHeight / 2 + rnd.nextDouble() * safeHeight,
+        ),
+        length: 45 + rnd.nextDouble() * 220,
         angle: rnd.nextDouble() * pi * 2,
-        isHour: false,
-        controllerIndex: hour12 + i,
+        thickness: 1.0,
       ));
     }
 
-    // Extra thin lines
-    for (int i = 0; i < 25; i++) {
-      lines.add(LineData(
-        thickness: 1.0,
-        length: 40 + rnd.nextDouble() * 160,
-        angle: rnd.nextDouble() * pi * 2,
-        isHour: false,
-        controllerIndex: hour12 + minute + i,
-      ));
-    }
+    _lastHour = hour;
+    _lastMinute = minute;
   }
 
   @override
   void didUpdateWidget(covariant LineArtScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.currentTime != widget.currentTime) {
-      // Dispose old controllers
-      for (var c in controllers) c.dispose();
       _generateLines();
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    // Extra safety: force regeneration if time changed
+    if (widget.currentTime.hour != _lastHour || widget.currentTime.minute != _lastMinute) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _generateLines();
+        if (mounted) setState(() {});
+      });
+    }
+
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
       onVerticalDragEnd: (details) {
@@ -97,56 +98,67 @@ class _LineArtScreenState extends State<LineArtScreen> with TickerProviderStateM
       onHorizontalDragEnd: (details) {
         if (details.primaryVelocity!.abs() > 300) widget.onScroll();
       },
-      child: Stack(
-        children: lines.map((line) {
-          final controller = controllers[line.controllerIndex];
-          final offset = Offset(
-            sin(controller.value * 2 * pi) * 25,
-            cos(controller.value * 2.3 * pi) * 18,
-          );
-
-          return Center(
-            child: Transform.translate(
-              offset: offset,
-              child: Transform.rotate(
-                angle: line.angle,
-                child: Container(
-                  width: line.length,
-                  height: line.thickness,
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(0),
-                  ),
-                ),
-              ),
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, child) {
+          return CustomPaint(
+            painter: LineArtPainter(
+              lines: lines,
+              animationValue: _controller.value,
             ),
+            size: Size.infinite,
           );
-        }).toList(),
+        },
       ),
     );
   }
 
   @override
   void dispose() {
-    for (var controller in controllers) {
-      controller.dispose();
-    }
+    _controller.dispose();
     super.dispose();
   }
 }
 
-class LineData {
-  final double thickness;
-  final double length;
-  final double angle;
-  final bool isHour;
-  final int controllerIndex;
+class Line {
+  Offset start;
+  double length;
+  double angle;
+  double thickness;
 
-  LineData({
-    required this.thickness,
+  Line({
+    required this.start,
     required this.length,
     required this.angle,
-    required this.isHour,
-    required this.controllerIndex,
+    required this.thickness,
   });
+}
+
+class LineArtPainter extends CustomPainter {
+  final List<Line> lines;
+  final double animationValue;
+
+  LineArtPainter({required this.lines, required this.animationValue});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.white
+      ..strokeCap = StrokeCap.butt;
+
+    for (var line in lines) {
+      final t = animationValue * 2 * pi;
+      final floatX = sin(t * 2.8 + line.start.dx * 0.018) * 11.0;
+      final floatY = cos(t * 2.4 + line.start.dy * 0.016) * 8.5;
+
+      final p1 = line.start + Offset(floatX, floatY);
+      final p2 = p1 + Offset(cos(line.angle) * line.length, sin(line.angle) * line.length);
+
+      paint.strokeWidth = line.thickness;
+      canvas.drawLine(p1, p2, paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant LineArtPainter oldDelegate) => true;
 }
