@@ -9,7 +9,16 @@ import 'color_art_screen.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+    DeviceOrientation.landscapeLeft,
+    DeviceOrientation.landscapeRight,
+  ]);
+
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  
   runApp(const InfiniteScrollClockApp());
 }
 
@@ -21,7 +30,9 @@ class InfiniteScrollClockApp extends StatelessWidget {
     return MaterialApp(
       title: 'Infinite Scroll Clock',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: Colors.black),
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: Colors.black,
+      ),
       home: const MainScreen(),
     );
   }
@@ -38,9 +49,16 @@ class _MainScreenState extends State<MainScreen> {
   String currentMode = 'Time';
   bool is24HourFormat = true;
   DateTime currentTime = DateTime.now();
-  int _lastDirection = 1;
   bool _showMenuButton = false;
   Timer? _hideTimer;
+
+  // Mechanical swipe tracking
+  Offset _totalDragDelta = Offset.zero;
+  static const double _minDragDistance = 90.0;
+
+  // Real-time drag for Time screen animation
+  Offset _currentDragOffset = Offset.zero;
+  bool _isDragging = false;
 
   @override
   void initState() {
@@ -74,15 +92,16 @@ class _MainScreenState extends State<MainScreen> {
   void _showMenuTemporarily() {
     setState(() => _showMenuButton = true);
     _hideTimer?.cancel();
-    _hideTimer = Timer(const Duration(seconds: 5), () {
+    _hideTimer = Timer(const Duration(seconds: 6), () {
       if (mounted) setState(() => _showMenuButton = false);
     });
   }
 
   void advanceTime(int minutes) {
     setState(() {
-      _lastDirection = minutes > 0 ? 1 : -1;
       currentTime = currentTime.add(Duration(minutes: minutes));
+      if (currentTime.hour >= 24) currentTime = currentTime.subtract(const Duration(hours: 24));
+      if (currentTime.hour < 0) currentTime = currentTime.add(const Duration(hours: 24));
     });
     _savePreferences();
   }
@@ -95,94 +114,12 @@ class _MainScreenState extends State<MainScreen> {
   void changeMode(String mode) {
     setState(() => currentMode = mode);
     _savePreferences();
+    Navigator.pop(context);
   }
 
   void toggleTimeFormat() {
     setState(() => is24HourFormat = !is24HourFormat);
     _savePreferences();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: _showMenuTemporarily,
-        onDoubleTap: syncToRealTime,
-        onVerticalDragEnd: (details) {
-          if (currentMode == 'Time') {
-            if (details.primaryVelocity! < -400) advanceTime(1);
-            else if (details.primaryVelocity! > 400) advanceTime(-1);
-          }
-        },
-        onHorizontalDragEnd: (details) {
-          if (currentMode == 'Time') {
-            if (details.primaryVelocity! < -400) advanceTime(1);
-            else if (details.primaryVelocity! > 400) advanceTime(-1);
-          }
-        },
-        child: Stack(
-          children: [
-            _buildCurrentMode(),
-            if (_showMenuButton)
-              Positioned(
-                top: 20,
-                left: 20,
-                child: Builder(
-                  builder: (context) => IconButton(
-                    icon: const Icon(Icons.menu, color: Colors.white70, size: 32),
-                    onPressed: () => Scaffold.of(context).openDrawer(),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-      drawer: _buildDrawer(),
-    );
-  }
-
-  Widget _buildCurrentMode() {
-    switch (currentMode) {
-      case 'Color Art':
-        return const ColorArtScreen();
-      case 'Line Art':
-        return LineArtScreen(
-          currentTime: currentTime,
-          onScroll: () => advanceTime(1),
-        );
-      case 'Time':
-      default:
-        return TimeScreen(
-          currentTime: currentTime,
-          is24Hour: is24HourFormat,
-          direction: _lastDirection,
-        );
-    }
-  }
-
-  Widget _buildDrawer() {
-    return Drawer(
-      backgroundColor: Colors.black,
-      child: ListView(
-        padding: EdgeInsets.zero,
-        children: [
-          const DrawerHeader(
-            decoration: BoxDecoration(color: Colors.black),
-            child: Text('Infinite Scroll', style: TextStyle(fontSize: 28, color: Colors.white)),
-          ),
-          ListTile(title: const Text('Time'), onTap: () => {changeMode('Time'), Navigator.pop(context)}),
-          ListTile(title: const Text('Color Art'), onTap: () => {changeMode('Color Art'), Navigator.pop(context)}),
-          ListTile(title: const Text('Line Art'), onTap: () => {changeMode('Line Art'), Navigator.pop(context)}),
-          ListTile(
-            title: const Text('Time Format'),
-            trailing: Text(is24HourFormat ? '24H' : '12H'),
-            onTap: () { toggleTimeFormat(); Navigator.pop(context); },
-          ),
-          ListTile(title: const Text('About'), onTap: () { Navigator.pop(context); _showAboutDialog(); }),
-        ],
-      ),
-    );
   }
 
   void _showAboutDialog() {
@@ -198,6 +135,112 @@ class _MainScreenState extends State<MainScreen> {
           '• Scroll = advance / rewind time',
         ),
         actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
+      ),
+    );
+  }
+
+  void _handlePanUpdate(DragUpdateDetails details) {
+    setState(() {
+      _totalDragDelta += details.delta;
+      _currentDragOffset = _totalDragDelta;
+      _isDragging = true;
+    });
+  }
+
+  void _handlePanEnd(DragEndDetails details) {
+    final distance = _totalDragDelta.distance;
+
+    if (distance > _minDragDistance) {
+      advanceTime(1);
+    }
+
+    // Reset drag
+    setState(() {
+      _totalDragDelta = Offset.zero;
+      _currentDragOffset = Offset.zero;
+      _isDragging = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: _showMenuTemporarily,
+        onDoubleTap: syncToRealTime,
+        onPanUpdate: _handlePanUpdate,
+        onPanEnd: _handlePanEnd,
+        child: Stack(
+          children: [
+            _buildCurrentMode(),
+            if (_showMenuButton)
+              Positioned(
+                top: 30,
+                left: 30,
+                child: Builder(
+                  builder: (context) => IconButton(
+                    icon: const Icon(Icons.menu, color: Colors.white, size: 36),
+                    onPressed: () => Scaffold.of(context).openDrawer(),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+      drawer: _buildDrawer(),
+    );
+  }
+
+  Widget _buildCurrentMode() {
+    switch (currentMode) {
+      case 'Color Art':
+        return ColorArtScreen(currentTime: currentTime);
+      case 'Line Art':
+        return LineArtScreen(
+          currentTime: currentTime,
+          onScroll: () {},
+        );
+      case 'Time':
+      default:
+        return TimeScreen(
+          currentTime: currentTime,
+          is24Hour: is24HourFormat,
+          dragOffset: _currentDragOffset,
+          isDragging: _isDragging,
+        );
+    }
+  }
+
+  Widget _buildDrawer() {
+    return Drawer(
+      backgroundColor: Colors.black87,
+      child: ListView(
+        padding: EdgeInsets.zero,
+        children: [
+          const DrawerHeader(
+            decoration: BoxDecoration(color: Colors.black),
+            child: Text('Infinite Scroll', style: TextStyle(fontSize: 28, color: Colors.white)),
+          ),
+          ListTile(title: const Text('Time'), onTap: () => changeMode('Time')),
+          ListTile(title: const Text('Color Art'), onTap: () => changeMode('Color Art')),
+          ListTile(title: const Text('Line Art'), onTap: () => changeMode('Line Art')),
+          ListTile(
+            title: const Text('Time Format'),
+            trailing: Text(is24HourFormat ? '24H' : '12H'),
+            onTap: () {
+              toggleTimeFormat();
+              Navigator.pop(context);
+            },
+          ),
+          ListTile(
+            title: const Text('About'),
+            onTap: () {
+              Navigator.pop(context);
+              _showAboutDialog();
+            },
+          ),
+        ],
       ),
     );
   }

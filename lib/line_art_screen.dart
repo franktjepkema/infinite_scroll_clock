@@ -1,5 +1,5 @@
-import 'package:flutter/material.dart';
 import 'dart:math';
+import 'package:flutter/material.dart';
 
 class LineArtScreen extends StatefulWidget {
   final DateTime currentTime;
@@ -16,60 +16,32 @@ class LineArtScreen extends StatefulWidget {
 }
 
 class _LineArtScreenState extends State<LineArtScreen> with SingleTickerProviderStateMixin {
-  late AnimationController _controller;
-  List<Line> lines = [];
-  final Random rnd = Random();
-  int _lastHour = -1;
-  int _lastMinute = -1;
+  late AnimationController _floatController;
+  List<Line> _lines = [];
+  Offset _scrollOffset = Offset.zero;
+  Size? _screenSize;
+  bool _isLandscape = true;
 
   @override
   void initState() {
     super.initState();
-    _controller = AnimationController(vsync: this, duration: const Duration(seconds: 24))..repeat();
-    _generateLines();
+    _floatController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 32),
+    )..repeat(reverse: true);
   }
 
-  void _generateLines() {
-    lines.clear();
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final newSize = MediaQuery.of(context).size;
+    final newIsLandscape = newSize.width > newSize.height;
 
-    final size = MediaQuery.of(context).size;
-    final centerX = size.width / 2;
-    final centerY = size.height / 2;
-
-    final safeWidth = size.width * 0.85;
-    final safeHeight = size.height * 0.85;
-
-    final hour = widget.currentTime.hour;
-    final minute = widget.currentTime.minute;
-
-    // === THICK LINES = HOUR ===
-    for (int i = 0; i < hour; i++) {
-      lines.add(Line(
-        start: Offset(
-          centerX - safeWidth / 2 + rnd.nextDouble() * safeWidth,
-          centerY - safeHeight / 2 + rnd.nextDouble() * safeHeight,
-        ),
-        length: 100 + rnd.nextDouble() * 380,
-        angle: rnd.nextDouble() * pi * 2,
-        thickness: 14.0,
-      ));
+    if (_screenSize != newSize || _isLandscape != newIsLandscape) {
+      _screenSize = newSize;
+      _isLandscape = newIsLandscape;
+      _generateLines();
     }
-
-    // === THIN LINES = MINUTE ===
-    for (int i = 0; i < minute; i++) {
-      lines.add(Line(
-        start: Offset(
-          centerX - safeWidth / 2 + rnd.nextDouble() * safeWidth,
-          centerY - safeHeight / 2 + rnd.nextDouble() * safeHeight,
-        ),
-        length: 45 + rnd.nextDouble() * 220,
-        angle: rnd.nextDouble() * pi * 2,
-        thickness: 1.0,
-      ));
-    }
-
-    _lastHour = hour;
-    _lastMinute = minute;
   }
 
   @override
@@ -81,82 +53,151 @@ class _LineArtScreenState extends State<LineArtScreen> with SingleTickerProvider
   }
 
   @override
-  Widget build(BuildContext context) {
-    // Extra safety: force regeneration if time changed
-    if (widget.currentTime.hour != _lastHour || widget.currentTime.minute != _lastMinute) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _generateLines();
-        if (mounted) setState(() {});
-      });
+  void dispose() {
+    _floatController.dispose();
+    super.dispose();
+  }
+
+  void _generateLines() {
+    if (_screenSize == null) return;
+    final random = Random();
+    final size = _screenSize!;
+
+    _lines.clear();
+
+    final hour = widget.currentTime.hour;
+    final minute = widget.currentTime.minute;
+
+    final baseCount = _isLandscape ? 1.0 : 0.75; // Fewer lines in portrait
+
+    for (int i = 0; i < (hour.clamp(3, 23) * baseCount + 5).toInt(); i++) {
+      _lines.add(Line(
+        start: _randomCentralPoint(size, random),
+        length: 65 + random.nextDouble() * 135,
+        thickness: 10 + random.nextDouble() * 20,
+        angle: random.nextDouble() * pi * 2,
+        isHour: true,
+      ));
     }
 
-    return GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      onVerticalDragEnd: (details) {
-        if (details.primaryVelocity!.abs() > 300) widget.onScroll();
-      },
-      onHorizontalDragEnd: (details) {
-        if (details.primaryVelocity!.abs() > 300) widget.onScroll();
-      },
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, child) {
-          return CustomPaint(
-            painter: LineArtPainter(
-              lines: lines,
-              animationValue: _controller.value,
-            ),
-            size: Size.infinite,
-          );
-        },
-      ),
+    for (int i = 0; i < (minute.clamp(10, 60) * baseCount + 10).toInt(); i++) {
+      _lines.add(Line(
+        start: _randomCentralPoint(size, random),
+        length: 30 + random.nextDouble() * 100,
+        thickness: 1.0,
+        angle: random.nextDouble() * pi * 2,
+        isHour: false,
+      ));
+    }
+
+    setState(() {});
+  }
+
+  Offset _randomCentralPoint(Size size, Random random) {
+    final centerX = size.width / 2;
+    final centerY = size.height / 2;
+    return Offset(
+      centerX + (random.nextDouble() - 0.5) * size.width * 0.68,
+      centerY + (random.nextDouble() - 0.5) * size.height * 0.68,
     );
   }
 
+  void _handleScroll(Offset delta) {
+    // Use the dominant direction based on orientation
+    final primaryDelta = _isLandscape ? delta.dx : delta.dy;
+    
+    setState(() {
+      _scrollOffset += Offset(delta.dx * 0.8, delta.dy * 0.8);
+    });
+
+    widget.onScroll();
+    _addEnteringLines(delta);
+  }
+
+  void _addEnteringLines(Offset delta) {
+    if (_screenSize == null) return;
+    final random = Random();
+    final size = _screenSize!;
+
+    for (int i = 0; i < 3; i++) {
+      _lines.add(Line(
+        start: _randomCentralPoint(size, random) - delta * 2.0,
+        length: 40 + random.nextDouble() * 110,
+        thickness: random.nextBool() ? 1.0 : 11 + random.nextDouble() * 16,
+        angle: random.nextDouble() * pi * 2,
+        isHour: random.nextBool(),
+      ));
+    }
+
+    _lines.removeWhere((line) =>
+        (line.start + _scrollOffset).distance > size.width * 2.5);
+  }
+
   @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onPanUpdate: (details) => _handleScroll(details.delta),
+      child: Container(
+        color: Colors.black,
+        child: CustomPaint(
+          painter: LineArtPainter(
+            lines: _lines,
+            scrollOffset: _scrollOffset,
+            floatAnimation: _floatController,
+            screenSize: _screenSize ?? MediaQuery.of(context).size,
+          ),
+          size: _screenSize ?? MediaQuery.of(context).size,
+        ),
+      ),
+    );
   }
 }
 
+// Line and Painter classes remain the same as before
 class Line {
-  Offset start;
-  double length;
-  double angle;
-  double thickness;
-
-  Line({
-    required this.start,
-    required this.length,
-    required this.angle,
-    required this.thickness,
-  });
+  final Offset start;
+  final double length;
+  final double thickness;
+  final double angle;
+  final bool isHour;
+  Line({required this.start, required this.length, required this.thickness, required this.angle, required this.isHour});
 }
 
 class LineArtPainter extends CustomPainter {
   final List<Line> lines;
-  final double animationValue;
+  final Offset scrollOffset;
+  final Animation<double> floatAnimation;
+  final Size screenSize;
 
-  LineArtPainter({required this.lines, required this.animationValue});
+  LineArtPainter({required this.lines, required this.scrollOffset, required this.floatAnimation, required this.screenSize});
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.white
-      ..strokeCap = StrokeCap.butt;
+    final paint = Paint()..color = Colors.white..strokeCap = StrokeCap.square;
+    final float = sin(floatAnimation.value * pi * 2) * 2.0;
 
-    for (var line in lines) {
-      final t = animationValue * 2 * pi;
-      final floatX = sin(t * 2.8 + line.start.dx * 0.018) * 11.0;
-      final floatY = cos(t * 2.4 + line.start.dy * 0.016) * 8.5;
+    for (final line in lines) {
+      final baseStart = line.start + scrollOffset;
+      final floatedStart = baseStart + Offset(0, float * (line.isHour ? 1.4 : 0.8));
 
-      final p1 = line.start + Offset(floatX, floatY);
-      final p2 = p1 + Offset(cos(line.angle) * line.length, sin(line.angle) * line.length);
+      final end = floatedStart + Offset(
+        cos(line.angle) * line.length,
+        sin(line.angle) * line.length,
+      );
 
       paint.strokeWidth = line.thickness;
-      canvas.drawLine(p1, p2, paint);
+      final maxOverhang = line.length * 0.3;
+
+      if (_isMostlyOnScreen(floatedStart, end, size, maxOverhang)) {
+        canvas.drawLine(floatedStart, end, paint);
+      }
     }
+  }
+
+  bool _isMostlyOnScreen(Offset start, Offset end, Size size, double maxOverhang) {
+    final lineRect = Rect.fromPoints(start, end);
+    final screenRect = Rect.fromLTWH(0, 0, size.width, size.height).inflate(maxOverhang);
+    return screenRect.overlaps(lineRect);
   }
 
   @override
