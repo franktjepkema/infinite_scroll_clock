@@ -68,7 +68,7 @@ class _LineArtScreenState extends State<LineArtScreen> with SingleTickerProvider
     final hour = widget.currentTime.hour;
     final minute = widget.currentTime.minute;
 
-    final baseCount = _isLandscape ? 1.0 : 0.75; // Fewer lines in portrait
+    final baseCount = _isLandscape ? 1.0 : 0.75;
 
     for (int i = 0; i < (hour.clamp(3, 23) * baseCount + 5).toInt(); i++) {
       _lines.add(Line(
@@ -103,9 +103,6 @@ class _LineArtScreenState extends State<LineArtScreen> with SingleTickerProvider
   }
 
   void _handleScroll(Offset delta) {
-    // Use the dominant direction based on orientation
-    final primaryDelta = _isLandscape ? delta.dx : delta.dy;
-    
     setState(() {
       _scrollOffset += Offset(delta.dx * 0.8, delta.dy * 0.8);
     });
@@ -153,7 +150,6 @@ class _LineArtScreenState extends State<LineArtScreen> with SingleTickerProvider
   }
 }
 
-// Line and Painter classes remain the same as before
 class Line {
   final Offset start;
   final double length;

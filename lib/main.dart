@@ -30,9 +30,7 @@ class InfiniteScrollClockApp extends StatelessWidget {
     return MaterialApp(
       title: 'Infinite Scroll Clock',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: Colors.black,
-      ),
+      theme: ThemeData.dark().copyWith(scaffoldBackgroundColor: Colors.black),
       home: const MainScreen(),
     );
   }
@@ -52,9 +50,7 @@ class _MainScreenState extends State<MainScreen> {
   bool _showMenuButton = false;
   Timer? _hideTimer;
 
-  // For real-time drag following
   Offset _currentDragOffset = Offset.zero;
-  bool _isDragging = false;
 
   @override
   void initState() {
@@ -73,8 +69,8 @@ class _MainScreenState extends State<MainScreen> {
     setState(() {
       currentMode = prefs.getString('currentMode') ?? 'Time';
       is24HourFormat = prefs.getBool('is24HourFormat') ?? true;
-      final savedTime = prefs.getString('savedTime');
-      if (savedTime != null) currentTime = DateTime.parse(savedTime);
+      final saved = prefs.getString('savedTime');
+      if (saved != null) currentTime = DateTime.parse(saved);
     });
   }
 
@@ -96,8 +92,6 @@ class _MainScreenState extends State<MainScreen> {
   void advanceTime(int minutes) {
     setState(() {
       currentTime = currentTime.add(Duration(minutes: minutes));
-      if (currentTime.hour >= 24) currentTime = currentTime.subtract(const Duration(hours: 24));
-      if (currentTime.hour < 0) currentTime = currentTime.add(const Duration(hours: 24));
     });
     _savePreferences();
   }
@@ -118,37 +112,14 @@ class _MainScreenState extends State<MainScreen> {
     _savePreferences();
   }
 
-  void _showAboutDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('About'),
-        content: const Text(
-          'Infinite Scroll Clock by Tjep.\n\n'
-          'Time only advances through mechanical scrolling.\n\n'
-          '• Double-tap to sync with real time\n'
-          '• Scroll = advance / rewind time',
-        ),
-        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
-      ),
-    );
-  }
-
   void _handlePanUpdate(DragUpdateDetails details) {
-    setState(() {
-      _currentDragOffset += details.delta;
-    });
+    setState(() => _currentDragOffset += details.delta);
   }
 
   void _handlePanEnd(DragEndDetails details) {
-    if (_currentDragOffset.distance > 90) {
+    if (_currentDragOffset.distance > 65) {
       advanceTime(1);
     }
-    // Reset drag offset after release
-    setState(() {
-      _currentDragOffset = Offset.zero;
-    });
   }
 
   @override
@@ -165,13 +136,11 @@ class _MainScreenState extends State<MainScreen> {
             _buildCurrentMode(),
             if (_showMenuButton)
               Positioned(
-                top: 30,
-                left: 30,
-                child: Builder(
-                  builder: (context) => IconButton(
-                    icon: const Icon(Icons.menu, color: Colors.white, size: 36),
-                    onPressed: () => Scaffold.of(context).openDrawer(),
-                  ),
+                top: 40,
+                left: 40,
+                child: IconButton(
+                  icon: const Icon(Icons.menu, color: Colors.white70, size: 36),
+                  onPressed: () => Scaffold.of(context).openDrawer(),
                 ),
               ),
           ],
@@ -184,19 +153,16 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildCurrentMode() {
     switch (currentMode) {
       case 'Color Art':
-        return ColorArtScreen(currentTime: currentTime);
+        return const ColorArtScreen();
       case 'Line Art':
-        return LineArtScreen(
-          currentTime: currentTime,
-          onScroll: () {},
-        );
+        return LineArtScreen(currentTime: currentTime, onScroll: () {});
       case 'Time':
       default:
         return TimeScreen(
           currentTime: currentTime,
           is24Hour: is24HourFormat,
           dragOffset: _currentDragOffset,
-          isDragging: _currentDragOffset.distance > 20,
+          isDragging: _currentDragOffset.distance > 8,
         );
     }
   }
@@ -220,13 +186,6 @@ class _MainScreenState extends State<MainScreen> {
             onTap: () {
               toggleTimeFormat();
               Navigator.pop(context);
-            },
-          ),
-          ListTile(
-            title: const Text('About'),
-            onTap: () {
-              Navigator.pop(context);
-              _showAboutDialog();
             },
           ),
         ],
