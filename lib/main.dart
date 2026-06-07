@@ -52,11 +52,7 @@ class _MainScreenState extends State<MainScreen> {
   bool _showMenuButton = false;
   Timer? _hideTimer;
 
-  // Mechanical swipe tracking
-  Offset _totalDragDelta = Offset.zero;
-  static const double _minDragDistance = 90.0;
-
-  // Real-time drag for Time screen animation
+  // For real-time drag following
   Offset _currentDragOffset = Offset.zero;
   bool _isDragging = false;
 
@@ -141,24 +137,17 @@ class _MainScreenState extends State<MainScreen> {
 
   void _handlePanUpdate(DragUpdateDetails details) {
     setState(() {
-      _totalDragDelta += details.delta;
-      _currentDragOffset = _totalDragDelta;
-      _isDragging = true;
+      _currentDragOffset += details.delta;
     });
   }
 
   void _handlePanEnd(DragEndDetails details) {
-    final distance = _totalDragDelta.distance;
-
-    if (distance > _minDragDistance) {
+    if (_currentDragOffset.distance > 90) {
       advanceTime(1);
     }
-
-    // Reset drag
+    // Reset drag offset after release
     setState(() {
-      _totalDragDelta = Offset.zero;
       _currentDragOffset = Offset.zero;
-      _isDragging = false;
     });
   }
 
@@ -207,7 +196,7 @@ class _MainScreenState extends State<MainScreen> {
           currentTime: currentTime,
           is24Hour: is24HourFormat,
           dragOffset: _currentDragOffset,
-          isDragging: _isDragging,
+          isDragging: _currentDragOffset.distance > 20,
         );
     }
   }

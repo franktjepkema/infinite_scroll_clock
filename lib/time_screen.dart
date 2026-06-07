@@ -19,15 +19,15 @@ class TimeScreen extends StatefulWidget {
 }
 
 class _TimeScreenState extends State<TimeScreen> with SingleTickerProviderStateMixin {
-  late AnimationController _animationController;
+  late AnimationController _snapController;
   DateTime? _previousTime;
 
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
+    _snapController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 580),
+      duration: const Duration(milliseconds: 750), // Slower, more luxurious snap
     );
   }
 
@@ -36,13 +36,13 @@ class _TimeScreenState extends State<TimeScreen> with SingleTickerProviderStateM
     super.didUpdateWidget(oldWidget);
     if (oldWidget.currentTime != widget.currentTime) {
       _previousTime = oldWidget.currentTime;
-      _animationController.forward(from: 0.0);
+      _snapController.forward(from: 0.0);
     }
   }
 
   @override
   void dispose() {
-    _animationController.dispose();
+    _snapController.dispose();
     super.dispose();
   }
 
@@ -59,18 +59,19 @@ class _TimeScreenState extends State<TimeScreen> with SingleTickerProviderStateM
       color: Colors.black,
       child: Center(
         child: AnimatedBuilder(
-          animation: _animationController,
+          animation: _snapController,
           builder: (context, child) {
-            // Follow mechanical drag during swipe
-            final dragInfluence = widget.isDragging 
+            // During drag: follow the mechanical arm slowly
+            final Offset dragOffset = widget.isDragging 
                 ? widget.dragOffset * 0.75 
                 : Offset.zero;
 
-            // New time slides up from bottom
-            final double slideUp = (1.0 - Curves.easeOutCubic.transform(_animationController.value)) * 140;
+            // After release: slow elegant slide up from bottom
+            final double slideProgress = 1.0 - Curves.easeOutCubic.transform(_snapController.value);
+            final double slideUp = slideProgress * 180;
 
             return Transform.translate(
-              offset: dragInfluence + Offset(0, slideUp),
+              offset: dragOffset + Offset(0, slideUp),
               child: Text(
                 currentText,
                 style: TextStyle(
