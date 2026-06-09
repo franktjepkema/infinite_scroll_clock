@@ -6,7 +6,8 @@ import 'package:flutter/material.dart';
 /// Net movement (logical pixels, along the primary axis) a swipe must reach
 /// before it commits one minute in the *art* modes. Displacement-based, not
 /// velocity-based, so slow mechanical-arm swipes register reliably.
-/// (Time mode uses its own physics model in TimeScreen and ignores this.)
+/// (Simple Clock and Celestial Clock use their own physics model and ignore
+/// this; Color Art, Glitch Art, etc. use the threshold-based commit.)
 const double kCommitThreshold = 34.0;
 
 /// Flip if the mechanical arm advances time opposite to what reads naturally on
@@ -20,8 +21,9 @@ const bool kInvertScrollDirection = false;
 /// All gestures are captured by ONE detector in [MainScreen] and pushed into
 /// this [ChangeNotifier]. Only the active mode screen listens, so a single
 /// CustomPaint / strip repaints per frame instead of rebuilding the whole tree
-/// at 60 fps. Time mode reads the live deltas (for 1:1 follow) and the release
-/// velocity (for inertia); the art modes read the deltas and the commit counter.
+/// at 60 fps. The clock modes read the live deltas (for 1:1 follow) and the
+/// release velocity (for inertia); the art modes read the deltas and the commit
+/// counter.
 class MotionController extends ChangeNotifier {
   /// True while a pan gesture (finger or mechanical arm) is in progress.
   bool isDragging = false;
@@ -35,7 +37,7 @@ class MotionController extends ChangeNotifier {
   /// Accumulated movement since the current gesture began.
   Offset gestureTotal = Offset.zero;
 
-  /// Release velocity (logical px/s), set on [end]. Drives Time-mode inertia.
+  /// Release velocity (logical px/s), set on [end]. Drives clock-mode inertia.
   Offset velocity = Offset.zero;
 
   /// Increments on every [update] call. Listeners cache the last value to
@@ -43,7 +45,7 @@ class MotionController extends ChangeNotifier {
   int updateTick = 0;
 
   /// Monotonic counter, incremented once for every committed minute step
-  /// (used by the art modes; Time mode steps through its own callback).
+  /// (used by the art modes; the clock modes step through their own callback).
   int committedScrolls = 0;
 
   /// Sign (+1 / -1) of the most recently committed scroll step.

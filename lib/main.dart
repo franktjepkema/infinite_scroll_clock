@@ -5,9 +5,12 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'motion_controller.dart';
-import 'time_screen.dart';
-import 'line_art_screen.dart';
+import 'simple_clock.dart'; // digital "Simple Clock" (class TimeScreen)
+import 'celestial_clock.dart'; // "Celestial Clock" sigil (class CelestialClockScreen)
 import 'color_art_screen.dart';
+import 'glitch_art.dart';
+import 'volume_scene.dart';
+import 'still_life.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -23,7 +26,7 @@ void main() {
   // True full-screen: no status bar, no navigation bar.
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
 
-  // NOTE: for the permanent wall installation, keep the screen awake by adding
+  // NOTE: for the permanent installation, keep the screen awake by adding
   // `wakelock_plus` to pubspec.yaml and calling `WakelockPlus.enable();` here.
   runApp(const InfiniteScrollClockApp());
 }
@@ -53,7 +56,9 @@ class _MainScreenState extends State<MainScreen> {
   // Single source of truth for gestures, shared with the active mode screen.
   final MotionController _motion = MotionController();
 
-  String _mode = 'Time';
+  // Mode keys (also used as menu labels): 'Simple Clock', 'Celestial Clock',
+  // 'Color Art', 'Glitch Art', 'Volumes', 'Still Life'.
+  String _mode = 'Simple Clock';
   bool _is24Hour = true;
   DateTime _time = DateTime.now();
 
@@ -86,13 +91,17 @@ class _MainScreenState extends State<MainScreen> {
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
-      _mode = p.getString('mode') ?? 'Time';
+      var mode = p.getString('mode') ?? 'Simple Clock';
+      // Migrate legacy mode names so existing installs don't reset to default.
+      if (mode == 'Time') mode = 'Simple Clock';
+      if (mode == 'Line Art') mode = 'Celestial Clock';
+      if (mode == 'Mobile Art') mode = 'Volumes';
+      _mode = mode;
       _is24Hour = p.getBool('is24Hour') ?? true;
-      final saved = p.getString('savedTime');
-      if (saved != null) {
-        final t = DateTime.tryParse(saved);
-        if (t != null) _time = t;
-      }
+      // Always start synced to the real wall-clock time. From here on the clock
+      // only ever advances through mechanical scrolling (or a double-tap sync);
+      // it deliberately does NOT restore the last displayed time.
+      _time = DateTime.now();
     });
   }
 
@@ -127,10 +136,10 @@ class _MainScreenState extends State<MainScreen> {
   void _onPanUpdate(DragUpdateDetails d) {
     _motion.update(d.delta);
 
-    // Time and Line Art modes run a physics model in their own screens (live
-    // 1:1 follow + inertia) and report each committed minute back via onStep.
-    // Only Color Art relies on the threshold-based commit here.
-    if (_mode == 'Time' || _mode == 'Line Art') return;
+    // Simple Clock and Celestial Clock run a physics model in their own screens
+    // (live 1:1 follow + inertia) and report each committed minute via onStep.
+    // Color Art and Glitch Art rely on the threshold-based commit here.
+    if (_mode == 'Simple Clock' || _mode == 'Celestial Clock') return;
     if (_committedThisGesture) return;
 
     // Landscape: rightward (+dx) is forward. Portrait: upward (-dy) is forward.
@@ -142,7 +151,7 @@ class _MainScreenState extends State<MainScreen> {
       if (kInvertScrollDirection) dir = -dir;
       _committedThisGesture = true;
       _advance(dir);
-      _motion.commit(dir); // lets Color Art evolve on the step
+      _motion.commit(dir); // lets Color Art / Glitch Art evolve on the step
     }
   }
 
@@ -243,15 +252,21 @@ class _MainScreenState extends State<MainScreen> {
 
   Widget _buildMode() {
     switch (_mode) {
-      case 'Color Art':
-        return ColorArtScreen(motion: _motion);
-      case 'Line Art':
-        return LineArtScreen(
+      case 'Celestial Clock':
+        return CelestialClockScreen(
           currentTime: _time,
           motion: _motion,
           onStep: _advance, // physics model commits a minute through here
         );
-      case 'Time':
+      case 'Color Art':
+        return ColorArtScreen(motion: _motion);
+      case 'Glitch Art':
+        return GlitchArtScreen(motion: _motion);
+      case 'Volumes':
+        return VolumeSceneScreen(motion: _motion);
+      case 'Still Life':
+        return StillLifeScreen(motion: _motion);
+      case 'Simple Clock':
       default:
         return TimeScreen(
           currentTime: _time,
@@ -322,7 +337,7 @@ class _MenuOverlay extends StatelessWidget {
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
               onTap: onClose,
-              child: Container(color: Colors.black.withOpacity(0.55)),
+              child: Container(color: Colors.black.withValues(alpha: 0.55)),
             ),
           ),
           // Panel.
@@ -350,15 +365,25 @@ class _MenuOverlay extends StatelessWidget {
                             letterSpacing: 0.5),
                       ),
                     ),
-                    _tile('Time',
-                        selected: currentMode == 'Time',
-                        onTap: () => onSelect('Time')),
+                    // Clocks first, then the art modes.
+                    _tile('Simple Clock',
+                        selected: currentMode == 'Simple Clock',
+                        onTap: () => onSelect('Simple Clock')),
+                    _tile('Celestial Clock',
+                        selected: currentMode == 'Celestial Clock',
+                        onTap: () => onSelect('Celestial Clock')),
                     _tile('Color Art',
                         selected: currentMode == 'Color Art',
                         onTap: () => onSelect('Color Art')),
-                    _tile('Line Art',
-                        selected: currentMode == 'Line Art',
-                        onTap: () => onSelect('Line Art')),
+                    _tile('Glitch Art',
+                        selected: currentMode == 'Glitch Art',
+                        onTap: () => onSelect('Glitch Art')),
+                    _tile('Volumes',
+                        selected: currentMode == 'Volumes',
+                        onTap: () => onSelect('Volumes')),
+                    _tile('Still Life',
+                        selected: currentMode == 'Still Life',
+                        onTap: () => onSelect('Still Life')),
                     const Divider(
                         color: Colors.white24,
                         height: 1,
@@ -422,6 +447,11 @@ class AboutScreen extends StatelessWidget {
         fontSize: 22,
         fontWeight: FontWeight.w400,
         letterSpacing: 0.5);
+    const link = TextStyle(
+        color: Colors.white,
+        fontSize: 16,
+        fontWeight: FontWeight.w400,
+        letterSpacing: 1.0);
 
     return Scaffold(
       backgroundColor: Colors.black,
@@ -434,48 +464,64 @@ class AboutScreen extends StatelessWidget {
                 Text('Infinite Scroll', style: head),
                 SizedBox(height: 16),
                 Text(
-                  'Infinite Scroll is a series of kinetic sculptures by the design '
-                  'studio Tjep. that mechanize the compulsive gesture of digital '
-                  'scrolling. In Scrolling Through Time, a wall-mounted smartphone '
-                  'becomes a clock whose minutes are advanced only by a precise '
-                  'mechanical arm.',
+                  'Infinite Scroll is a series of clocks by Tjep., conceived as '
+                  'conceptual and aesthetic artworks built around the gesture of '
+                  'scrolling.',
                   style: body,
                 ),
                 SizedBox(height: 28),
-                Text('Setup', style: head),
+                Text('Time', style: head),
                 SizedBox(height: 12),
                 Text(
-                  'Mount the phone in the sculpture (horizontal or vertical) and '
-                  'launch this app. It runs full-screen and adapts to the '
-                  'orientation automatically.',
+                  'Each work is, first, a clock — but one where time is performed '
+                  'rather than simply read. The display moves only through the '
+                  'scrolling gesture, so the passing of each minute becomes a '
+                  'visible, deliberate event instead of a number that silently '
+                  'updates.',
                   style: body,
                 ),
                 SizedBox(height: 20),
-                Text('How time works', style: head),
+                Text('Concept', style: head),
                 SizedBox(height: 12),
                 Text(
-                  'The clock ignores the system time. Each clean swipe from the '
-                  'mechanical arm advances the display by exactly one minute; a '
-                  'swipe the other way moves it back.',
+                  'The series externalises the most automatic gesture of digital '
+                  'life. Scrolling — endless, effortless, half-conscious — has '
+                  'become the rhythm of modern attention; here it is given a '
+                  'purpose and made to carry time itself.',
                   style: body,
                 ),
                 SizedBox(height: 20),
-                Text('Synchronising', style: head),
+                Text('Aesthetic', style: head),
                 SizedBox(height: 12),
                 Text(
-                  'Double-tap anywhere on the screen to snap the clock to the real '
-                  'current time. After that, only mechanical scrolling advances it.',
+                  'Every face shares a pared-back foundation: white light on pure '
+                  'black, restraint, and motion as the main material. But the '
+                  'works are not all calm — their moods range widely, from the '
+                  'slow drift of Celestial Clock to the restless, fractured '
+                  'energy of Glitch. The series is meant to meet your mood rather '
+                  'than impose a single one.',
                   style: body,
                 ),
                 SizedBox(height: 20),
-                Text('Switching artworks', style: head),
+                Text('Function', style: head),
                 SizedBox(height: 12),
                 Text(
-                  'Touch the screen to reveal the menu in the top-left corner, then '
-                  'choose Time, Color Art or Line Art, or toggle the 24-hour / '
-                  '12-hour format.',
+                  'The clock offers several faces, each with its own temperament, '
+                  'so you can pick the one that fits how you feel. Simple Clock is '
+                  'purely functional — just the time. Celestial Clock is calm and '
+                  'contemplative. Color Art drifts through slowly evolving fields '
+                  'of colour. Glitch is restless and electric, anything but calm. '
+                  'Volumes rebuilds a luminous specimen of forms in three '
+                  'dimensions that you can gently turn. Still Life arranges a '
+                  'small set of objects into a slowly turning tableau.',
                   style: body,
                 ),
+                SizedBox(height: 36),
+                Divider(color: Colors.white24, height: 1),
+                SizedBox(height: 20),
+                Text('Infinite Scroll is a work by Tjep.', style: body),
+                SizedBox(height: 6),
+                Text('tjep.com', style: link),
               ],
             ),
             Positioned(
