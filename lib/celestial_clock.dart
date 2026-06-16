@@ -63,6 +63,15 @@ const List<List<double>> _kVeils = [
   [0.60, 1.5, 0.10, 0.0], // inner bright (2-fold)
 ];
 
+// Line cloud (the harmonograph veils) — overall visibility + slow breathing.
+// The cloud is kept much fainter than before and gently breathes: a smooth
+// envelope starts dim, swells to a visibility PEAK at half the period (≈30 s),
+// then recedes, never fully vanishing (a small floor remains). The release
+// flare still brightens the veils transiently on top of this.
+const double _kCloudVisibility = 0.5; // global dimmer for the woven veils (more visible)
+const double _kCloudPeakPeriodS = 60.0; // full breath; peak at half (≈30 s after a swipe)
+const double _kCloudFloor = 0.18; // trough level as a fraction of the peak
+
 // Release reaction — kept in spirit but deliberately gentle.
 const double _kFlareTau = 0.9; // s — how slowly a release flare decays
 const double _kFlareAlphaGain = 0.65; // veil brightness surge at release
@@ -77,10 +86,10 @@ const double _kHourOrbit = 0.58; // inner — a little out from the centre
 const double _kCometOrbit = 0.75; // EXACTLY between hour (0.58) and minute (0.92)
 
 // Comet: on release the asteroid simply keeps moving as it was, then fades out.
-const double _kCometSpan = 2 * math.pi * 1.15; // a full swipe sweeps ~1.15 turns
+const double _kCometSpan = 2 * math.pi * 2.30; // 2× longer trajectory (~2.30 turns per full swipe)
 const double _kCometFadeDurS = 0.9; // seconds for the post-release fade-out
-const double _kCometMinOmega = 1.2; // rad/s — gentle continuation floor
-const double _kCometMaxOmega = 8.0; // rad/s — cap so a fast fling isn't a blur
+const double _kCometMinOmega = 2.4; // rad/s — gentle continuation floor (2×)
+const double _kCometMaxOmega = 16.0; // rad/s — cap so a fast fling isn't a blur (2×)
 
 // Idle life (slow, hypnotic)
 const double _kIdleWindRate = 0.045; // rad/s phase shimmer at rest
@@ -119,6 +128,11 @@ class _CelestialClockScreenState extends State<CelestialClockScreen>
 
   // --- Release flare (spikes when a swipe lifts, decays) ---------------------
   double _flare = 0.0;
+
+  // Timestamp (seconds) of the last swipe release. The line-cloud breathing is
+  // anchored to this, so the cloud reaches its visibility peak ≈30 s AFTER a
+  // swipe ends. Starts at 0 so it also peaks ≈30 s after launch.
+  double _lastReleaseS = 0.0;
 
   // --- Hourly emblem (cached 3D solid, rebuilt only when the hour changes) ---
   int _solidIndex = -1;
@@ -287,7 +301,9 @@ class _CelestialClockScreenState extends State<CelestialClockScreen>
     }
   }
 
-  void _release(double forwardVelocity) {    final pos = _p.value;
+  void _release(double forwardVelocity) {
+    _lastReleaseS = _elapsedS; // anchor the line-cloud breathing to this swipe
+    final pos = _p.value;
     final projected = pos + forwardVelocity * 0.25; // 0.25 s velocity lookahead
     int dir;
     if (projected >= _dim * 0.15) {
@@ -539,6 +555,19 @@ class _SigilPainter extends CustomPainter {
 
   void _paintVeils(Canvas canvas, double cx, double cy, double rx, double ry,
       double mm, double elapsed, double turn, double flare) {
+    // The line cloud is kept very subtle and slowly breathes: a smooth envelope
+    // starts dim, swells to a visibility PEAK at half the period (≈30 s), then
+    // recedes — never fully vanishing (a small floor remains). The release
+    // flare still brightens the veils transiently on top of this baseline.
+    // Anchor the breathing to the last swipe so the cloud reaches its peak
+    // ≈30 s AFTER a swipe ends (period 60 s -> peak at half), then keeps
+    // breathing. Before any swipe it peaks ≈30 s after launch.
+    final tSinceRelease = elapsed - state._lastReleaseS;
+    final cloudEnv = 0.5 -
+        0.5 * math.cos(2 * math.pi * tSinceRelease / _kCloudPeakPeriodS);
+    final cloudVis =
+        _kCloudVisibility * (_kCloudFloor + (1 - _kCloudFloor) * cloudEnv);
+
     // A transient phase swirl on release, on top of the slow idle shimmer.
     final drift = elapsed * _kIdleWindRate + flare * _kFlareWind;
     final fp = _FigureParams.fromMinutes(mm, drift);
@@ -567,7 +596,10 @@ class _SigilPainter extends CustomPainter {
     for (final v in _kVeils) {
       final scale = v[0] * (1 + flare * _kFlareScaleGain); // swell on release
       final rotMul = v[1];
-      final alpha = (v[2] * (1 + flare * _kFlareAlphaGain)).clamp(0.0, 1.0);
+      // Base opacity is dimmed by the breathing cloud envelope, then the
+      // release flare can still surge it transiently.
+      final alpha = (v[2] * cloudVis * (1 + flare * _kFlareAlphaGain))
+          .clamp(0.0, 1.0);
       final fourFold = v[3] > 0.5;
       final paint = Paint()
         ..style = PaintingStyle.stroke
@@ -890,11 +922,13 @@ class _SigilPainter extends CustomPainter {
     canvas.drawArc(arcRect, -math.pi / 2, sweep, false, arc);
 
     // Faint whispers from the core toward each node (a hint of hands).
+    // Lines from the core to each node — accentuated to read at the same
+    // visibility as the large oval frame line (_kChromeAlpha).
     final whisper = Paint()
       ..strokeWidth = 1.0
       ..isAntiAlias = true
       ..blendMode = BlendMode.plus
-      ..color = Colors.white.withValues(alpha: 0.10);
+      ..color = Colors.white.withValues(alpha: _kChromeAlpha);
     final ha = -math.pi / 2 + (hourF % 12) / 12 * 2 * math.pi;
     final hourNode =
         Offset(cx + rHour * math.cos(ha), cy + rHour * math.sin(ha));

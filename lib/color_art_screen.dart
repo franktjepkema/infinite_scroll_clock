@@ -5,38 +5,40 @@ import 'package:flutter/scheduler.dart';
 
 import 'motion_controller.dart';
 
-/// Color Art mode.
+/// Color Art mode — an *infinite scrolling* colour field of soft, breathing
+/// gradient circles on pure black. Compositing uses [BlendMode.screen] so
+/// overlaps mix as *colour* (red + green = yellow) rather than washing to
+/// white — the painterly mixing that gives the mode its beauty.
 ///
-/// Four radial colour blobs drift across a pure-black field on independent
-/// orbital paths, each breathing in size on its own period and crossfading
-/// to fresh colours on its own schedule. Compositing uses [BlendMode.screen]
-/// so overlaps mix as *colour* rather than washing toward white.
+/// **One circle per blob (no stacking).** Each blob is a single radial
+/// gradient. Organic life comes not from gluing sub-circles together but from:
+///   • slow **radius breathing** — the blob swells and shrinks on its own
+///     period (this is what made the original composition feel alive); and
+///   • a very subtle **elliptical morph** — the one gradient is drawn through a
+///     slowly rotating / squashing canvas transform, so the silhouette drifts
+///     between round and gently oval. It stays a single smooth gradient, so
+///     the edge is always soft and the colour always pure.
 ///
-/// **Magnetic interaction.** During a swipe the mechanical arm's tip acts as
-/// a magnet. At the start of every gesture each of the four blobs is randomly
-/// assigned attract (+1) or repel (-1), with the constraint that the count
-/// of attractors is always in {1, 2, 3} — there is never an all-attract or
-/// all-repel field; the four blobs are always a mix.
+/// **Infinite scroll.** A gentle ambient current always drifts the whole field
+/// in a slowly-wandering direction, so the canvas is never static. The
+/// mechanical arm's swipe *helps you scroll*: during a drag the entire field
+/// tracks the arm 1:1, and on release the throw becomes momentum that glides
+/// and eases back to the ambient drift. Whichever way the canvas moves, blobs
+/// that leave the trailing edge are recycled just outside the *leading* edge
+/// with a fresh colour, size and morph — an endless stream of new colour. The
+/// raw gesture delta drives the scroll, so this is orientation-adaptive for
+/// free (horizontal in landscape, vertical in portrait).
 ///
-/// The pull/push is applied as a smoothly-eased target offset (τ ≈ 2 s) and
-/// only ramps up once the tip is meaningfully displaced (quadratic activation
-/// over 0..120 px), so at rest the magnet is genuinely dormant. After the arm
-/// releases, the tip's influence decays with τ ≈ 3 s and the blobs ease back
-/// toward their orbits — the entire response unfolds at a lava-lamp pace.
+/// **Even size distribution.** Each blob owns a fixed size *tier*, evenly
+/// spaced from smallest to largest, so the field always holds an even spread
+/// of sizes. The largest are ~8× the smallest and act as broad soft colour
+/// masses; the smallest are crisp accents. Big blobs are dimmed per-draw so a
+/// few screen-filling masses never wash the centre to white.
 ///
-/// **Mood cycle.** Each blob has a very slow secondary modulation
-/// (~95–150 s period) that coherently scales both its radius and its orbit
-/// reach. At different times one blob is *expansive* — large and roaming,
-/// often well past the screen edges — while another is *intimate* — small
-/// and close to centre. The four moods drift on independent periods.
-///
-/// **Commit-driven palette evolution.** On every minute commit a new
-/// four-colour palette is generated and crossfaded with per-blob staggered
-/// timings; base duration is set by recent gesture speed (fast = snappy,
-/// slow = languid). Direction biases a long-running palette anchor so many
-/// forward swipes gradually warm the cloud and many backward swipes cool it.
-/// A ~0.5°/s autonomous hue drift runs at all times so the cloud is never
-/// strictly static.
+/// **Colour evolution.** Every blob draws a colour from an evolving palette
+/// anchored on a hue that warms on forward commits and cools on backward ones
+/// (the per-minute scroll commit). A slow autonomous hue drift is layered on
+/// at draw time, so the whole field keeps shifting even at rest.
 class ColorArtScreen extends StatefulWidget {
   final MotionController motion;
   const ColorArtScreen({super.key, required this.motion});
@@ -45,34 +47,61 @@ class ColorArtScreen extends StatefulWidget {
   State<ColorArtScreen> createState() => _ColorArtScreenState();
 }
 
+// --- Tuning ------------------------------------------------------------------
+
+const int _kBlobCount = 14; // blobs alive in the field at once
+const double _kRadiusMinFrac = 0.16; // min blob radius (fraction of shortestSide) — small dots
+const double _kRadiusMaxFrac = 3.68; // max blob radius — ~8× the min, for big soft masses
+const double _kCoreAlpha = 0.70; // centre opacity (rich, for painterly screen mixing)
+const double _kBigDim = 0.45; // how much the largest blobs are dimmed (0..1 of alpha)
+
+const double _kBreathAmp = 0.18; // radius breathing depth (± fraction of base radius)
+const double _kMorphAmp = 0.12; // elliptical morph depth (± fraction on each axis)
+
+// Scrolling.
+const double _kAmbientSpeed = 12.0; // px/s — lazy baseline current
+const double _kAmbientTurn = 0.03; // rad/s — how fast the current's direction wanders
+const double _kInertiaTau = 1.3; // s — release-momentum decay
+const double _kMaxReleaseSpeed = 2500.0; // px/s — cap on fling momentum
+
+// Per-blob drift.
+const double _kOwnVelMin = 4.0; // px/s — faint independent drift
+const double _kOwnVelMax = 14.0;
+
+// Colour.
+const double _kHueDriftRate = 0.6; // deg/s — autonomous hue shimmer
+const double _kCommitWarmStep = 25.0; // deg per commit (forward warms / back cools)
+
 class _ColorArtScreenState extends State<ColorArtScreen>
     with TickerProviderStateMixin {
   late final Ticker _ticker;
-  // Increments every frame; painter listens to it and repaints.
   final ValueNotifier<int> _frame = ValueNotifier<int>(0);
-
   final math.Random _rng = math.Random();
-  late final _Anim _anim;
+
+  final _Scene _scene = _Scene();
 
   double _prevElapsedS = 0.0;
-  double _recentSpeed = 0.0; // px/s, EMA of gesture speed
   int _lastCommit = 0;
   int _lastUpdateTick = -1;
   bool _wasDragging = false;
+  bool _spawned = false;
 
-  /// Drifts on every commit by direction × 25° ± 20°; the palette gradually
-  /// warms or cools over many minutes of one-way scrolling.
+  // Scroll state.
+  Offset _pendingScroll = Offset.zero; // live 1:1 drag, consumed each tick
+  Offset _camVel = Offset.zero; // release momentum (decays to zero)
+  Offset _flow = const Offset(1, 0); // smoothed travel direction (for recycling)
+  double _ambientAngle = 0.0;
+
+  // Palette anchor (hue, degrees) — warms/cools with scroll commits.
   late double _paletteAnchor;
 
-  /// Tracked from MediaQuery; the magnetic update needs it to compute each
-  /// blob's current orbit position when the painter isn't running.
   Size _size = Size.zero;
 
   @override
   void initState() {
     super.initState();
     _paletteAnchor = _rng.nextDouble() * 360.0;
-    _anim = _Anim(_initBlobs(_paletteAnchor));
+    _ambientAngle = _rng.nextDouble() * 2 * math.pi;
     _lastCommit = widget.motion.committedScrolls;
     widget.motion.addListener(_onMotion);
     _ticker = createTicker(_onTick)..start();
@@ -81,7 +110,14 @@ class _ColorArtScreenState extends State<ColorArtScreen>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    _size = MediaQuery.of(context).size;
+    final newSize = MediaQuery.of(context).size;
+    if (newSize != _size) {
+      _size = newSize;
+      if (!_spawned && _size.width > 0 && _size.height > 0) {
+        _spawnInitial();
+        _spawned = true;
+      }
+    }
   }
 
   @override
@@ -102,153 +138,157 @@ class _ColorArtScreenState extends State<ColorArtScreen>
     super.dispose();
   }
 
-  // --- Initial composition ---------------------------------------------------
+  // --- Per-blob parameter helpers --------------------------------------------
 
-  List<_Blob> _initBlobs(double anchor) {
-    final pal = _generatePaletteFromAnchor(anchor);
-
-    // Per-blob parameters: orbit period and phase; orbit radii (fractions of
-    // screen w/h); base radius (fraction of shortestSide); radius-breath
-    // period and phase; very-slow "mood" period.
-    const periods = <double>[73.0, 97.0, 113.0, 137.0];
-    const phases = <double>[0.0, 1.91, 3.86, 5.56];
-    const orbitRX = <double>[0.25, 0.34, 0.28, 0.42];
-    const orbitRY = <double>[0.34, 0.24, 0.38, 0.28];
-    const baseRadii = <double>[0.55, 0.68, 0.58, 0.74];
-    const breathPeriods = <double>[23.0, 31.0, 27.0, 38.0];
-    const breathPhases = <double>[0.0, 1.26, 3.14, 4.71];
-    const moodPeriods = <double>[97.0, 113.0, 131.0, 149.0];
-
-    return List<_Blob>.generate(
-      4,
-      (i) => _Blob(
-        orbitPeriodS: periods[i],
-        orbitPhase: phases[i],
-        orbitRX: orbitRX[i],
-        orbitRY: orbitRY[i],
-        baseRadius: baseRadii[i],
-        breathPeriodS: breathPeriods[i],
-        breathPhase: breathPhases[i],
-        moodPeriodS: moodPeriods[i],
-        moodPhase: _rng.nextDouble() * 2 * math.pi,
-        magnetPolarity: _rng.nextBool() ? 1 : -1,
-        magnetStrength: 0.08 + _rng.nextDouble() * 0.10,
-        fromColor: pal[i],
-        toColor: pal[i],
-        fadeStartS: 0.0,
-        fadeDurationS: 0.001,
-      ),
-    );
+  /// Radius for an evenly-spaced size tier (0 = smallest, 1 = largest), with a
+  /// little jitter. Fixed per-blob tiers keep the count of blobs evenly spread
+  /// across the whole small→large range at all times.
+  double _radiusForTier(double tier) {
+    final span = _kRadiusMaxFrac - _kRadiusMinFrac;
+    final stepFrac = span / (_kBlobCount - 1);
+    final baseFrac = _kRadiusMinFrac + tier * span;
+    final jit = (_rng.nextDouble() - 0.5) * stepFrac * 0.8;
+    final frac =
+        (baseFrac + jit).clamp(_kRadiusMinFrac, _kRadiusMaxFrac).toDouble();
+    return _size.shortestSide * frac;
   }
 
-  /// On every new gesture, re-randomise the four magnet polarities under the
-  /// constraint: the count of attractors must be 1, 2, or 3. Never all four
-  /// of the same sign — we always want a visible mix of attract and repel.
-  void _randomizePolarities() {
-    const n = 4;
-    final attractCount = 1 + _rng.nextInt(n - 1); // 1..3
-    final indices = List<int>.generate(n, (i) => i);
-    indices.shuffle(_rng);
-    final attractSet = indices.sublist(0, attractCount).toSet();
-    for (var i = 0; i < _anim.blobs.length; i++) {
-      final b = _anim.blobs[i];
-      b.magnetPolarity = attractSet.contains(i) ? 1 : -1;
-      // Also re-pick the magnitude so successive cycles don't feel identical.
-      b.magnetStrength = 0.08 + _rng.nextDouble() * 0.10;
+  double _signed(double lo, double hi) =>
+      (_rng.nextBool() ? 1.0 : -1.0) * (lo + _rng.nextDouble() * (hi - lo));
+
+  Offset _ownVel() => Offset.fromDirection(
+      _rng.nextDouble() * 2 * math.pi,
+      _kOwnVelMin + _rng.nextDouble() * (_kOwnVelMax - _kOwnVelMin));
+
+  /// (Re)assign the time-varying personality of a blob: colour, drift, breath
+  /// and morph parameters. Used both at spawn and on recycle. The size tier is
+  /// left untouched so the even distribution persists.
+  void _refresh(_Blob b) {
+    b.radius = _radiusForTier(b.sizeTier);
+    b.color = _pickColor();
+    b.ownVel = _ownVel();
+
+    // Slow breathing: each blob swells/shrinks on its own ~18–38 s period.
+    b.breathPeriodS = 18.0 + _rng.nextDouble() * 20.0;
+    b.breathPhase = _rng.nextDouble() * 2 * math.pi;
+
+    // Subtle elliptical morph: independent x/y squash on ~22–48 s periods plus
+    // a slow rotation, so the soft circle drifts gently between round and oval.
+    b.morphPeriodX = 22.0 + _rng.nextDouble() * 26.0;
+    b.morphPeriodY = 22.0 + _rng.nextDouble() * 26.0;
+    b.morphPhaseX = _rng.nextDouble() * 2 * math.pi;
+    b.morphPhaseY = _rng.nextDouble() * 2 * math.pi;
+    b.morphRot = _signed(0.02, 0.08); // rad/s
+    b.morphPhaseR = _rng.nextDouble() * 2 * math.pi;
+  }
+
+  // --- Spawning / recycling --------------------------------------------------
+
+  /// Populate the screen at start so the field is full immediately.
+  void _spawnInitial() {
+    _scene.blobs
+      ..clear()
+      ..addAll(List<_Blob>.generate(_kBlobCount, (i) {
+        // Evenly spaced size tier: equal numbers of blobs from smallest to
+        // largest across the field.
+        final tier = _kBlobCount > 1 ? i / (_kBlobCount - 1) : 0.5;
+        final b = _Blob(
+          pos: Offset(_rng.nextDouble() * _size.width,
+              _rng.nextDouble() * _size.height),
+          sizeTier: tier,
+        );
+        _refresh(b);
+        return b;
+      }));
+  }
+
+  /// Recycle a blob that has fully left the screen: fresh identity, placed just
+  /// outside the *leading* edge so it flows back in. Tier is preserved.
+  void _recycle(_Blob b) {
+    _refresh(b);
+    b.pos = _entryPos(b.maxExtent);
+  }
+
+  /// A point just off-screen on the edge opposite to the current travel — so
+  /// the blob enters from the leading side as the canvas scrolls.
+  Offset _entryPos(double ext) {
+    final w = _size.width, h = _size.height;
+    final f = _flow.distance > 1e-3 ? _flow / _flow.distance : const Offset(1, 0);
+    if (f.dx.abs() >= f.dy.abs()) {
+      // Horizontal travel: enter from the left when moving right, else right.
+      final x = f.dx > 0 ? -ext : w + ext;
+      return Offset(x, _rng.nextDouble() * h);
+    } else {
+      final y = f.dy > 0 ? -ext : h + ext;
+      return Offset(_rng.nextDouble() * w, y);
     }
   }
 
-  // --- Continuous time integration -------------------------------------------
+  // --- Continuous integration ------------------------------------------------
 
   void _onTick(Duration elapsed) {
     final newElapsedS = elapsed.inMicroseconds / 1e6;
-    final dt = (newElapsedS - _prevElapsedS).clamp(0.0, 0.1);
+    final dt = (newElapsedS - _prevElapsedS).clamp(0.0, 0.1).toDouble();
     _prevElapsedS = newElapsedS;
-    _anim.elapsedS = newElapsedS;
+    _scene.elapsedS = newElapsedS;
 
-    final isDragging = widget.motion.isDragging;
+    // Autonomous hue shimmer — the field is never strictly static.
+    _scene.hueDrift += dt * _kHueDriftRate;
 
-    // Drift clock advances faster during a gesture and faster still with
-    // higher recent speed, lending the cloud subtle energy without ever
-    // snapping.
-    final speedFactor = (_recentSpeed / 800.0).clamp(0.0, 1.0);
-    final driftRate = (isDragging ? 1.6 : 1.0) + speedFactor * 0.3;
-    _anim.driftClock += dt * driftRate;
+    if (_size.width > 0 && _size.height > 0 && _scene.blobs.isNotEmpty) {
+      // Ambient current: a lazy, slowly-wandering baseline drift.
+      _ambientAngle += dt * _kAmbientTurn;
+      final ambient = Offset.fromDirection(_ambientAngle, _kAmbientSpeed);
 
-    // Slow autonomous hue drift — the cloud is never strictly static.
-    _anim.hueDrift += dt * 0.5; // degrees per second
+      // Total camera translation this frame = live 1:1 drag + (ambient + inertia).
+      final move = _pendingScroll + (ambient + _camVel) * dt;
+      _pendingScroll = Offset.zero;
+      _camVel = _camVel * math.exp(-dt / _kInertiaTau); // momentum eases out
 
-    // Decay tip influence and recent-speed memory after the gesture ends.
-    // The tip uses a long (~3 s) tau so the magnet's pull persists and fades
-    // at a lava-lamp pace.
-    if (!isDragging) {
-      _anim.dragOffset = _anim.dragOffset * math.exp(-dt / 3.0);
-      _recentSpeed *= math.exp(-dt / 1.5);
-    }
+      // Smooth the travel direction for stable recycling decisions.
+      _flow = Offset.lerp(_flow, move, 0.18) ?? _flow;
 
-    // Update each blob's magnetic offset by easing it toward its target.
-    // Target = (tip - orbit) × polarity × strength × activation, where the
-    // activation gates the effect off when the tip is near zero.
-    if (_size.width > 0 && _size.height > 0) {
-      const magneticTauS = 2.0;
-      final alpha = 1.0 - math.exp(-dt / magneticTauS);
-      final tip = _anim.dragOffset;
-
-      // Quadratic ramp 0..120 px of tip displacement -> 0..1 activation, so
-      // at rest the magnet is dormant rather than holding a center-pull.
-      final tipNorm = (tip.distance / 120.0).clamp(0.0, 1.0);
-      final activation = tipNorm * tipNorm;
-
-      final w = _size.width;
-      final h = _size.height;
-      for (final b in _anim.blobs) {
-        final theta =
-            2 * math.pi * _anim.driftClock / b.orbitPeriodS + b.orbitPhase;
-        final mood = math.sin(
-            2 * math.pi * _anim.elapsedS / b.moodPeriodS + b.moodPhase);
-        final moodOrbitF = 1.0 + 0.25 * mood;
-        final orbit = Offset(
-          math.cos(theta) * w * b.orbitRX * moodOrbitF,
-          math.sin(theta * 0.83) * h * b.orbitRY * moodOrbitF,
-        );
-        final target = (tip - orbit) *
-            (b.magnetStrength * b.magnetPolarity.toDouble() * activation);
-        b.magneticOffset = Offset.lerp(b.magneticOffset, target, alpha)!;
+      final w = _size.width, h = _size.height;
+      for (final b in _scene.blobs) {
+        b.pos += move + b.ownVel * dt;
+        final ext = b.maxExtent;
+        if (b.pos.dx < -ext ||
+            b.pos.dx > w + ext ||
+            b.pos.dy < -ext ||
+            b.pos.dy > h + ext) {
+          _recycle(b);
+        }
       }
     }
 
     _frame.value += 1;
   }
 
-  // --- Discrete motion handling ----------------------------------------------
+  // --- Gesture ---------------------------------------------------------------
 
   void _onMotion() {
     final m = widget.motion;
 
-    // Re-polarise the blobs at the very start of each gesture.
     if (m.isDragging && !_wasDragging) {
       _wasDragging = true;
-      _randomizePolarities();
+      _camVel = Offset.zero; // the drag itself now drives motion 1:1
     } else if (!m.isDragging && _wasDragging) {
       _wasDragging = false;
+      // Release: the throw becomes momentum (capped), then decays to ambient.
+      var v = m.velocity;
+      if (v.distance > _kMaxReleaseSpeed) {
+        v = v / v.distance * _kMaxReleaseSpeed;
+      }
+      _camVel = v;
     }
 
-    // Live drag: accumulate tip displacement and update the recent-speed EMA.
+    // Live drag: scroll the whole field 1:1 with the arm.
     if (m.isDragging && m.updateTick != _lastUpdateTick) {
       _lastUpdateTick = m.updateTick;
-
-      var next = _anim.dragOffset + m.liveDelta;
-      const cap = 320.0; // a little more reach than before, to feed the magnet
-      if (next.distance > cap) {
-        next = next / next.distance * cap;
-      }
-      _anim.dragOffset = next;
-
-      // Frame-time-independent speed approximation (px/s, assuming ~60 fps).
-      final inst = m.liveDelta.distance * 60.0;
-      _recentSpeed = _recentSpeed * 0.80 + inst * 0.20;
+      _pendingScroll += m.liveDelta;
     }
 
+    // Per-minute commit nudges the palette: forward warms, backward cools.
     if (m.committedScrolls != _lastCommit) {
       _lastCommit = m.committedScrolls;
       _onCommit(m.lastDirection);
@@ -256,95 +296,54 @@ class _ColorArtScreenState extends State<ColorArtScreen>
   }
 
   void _onCommit(int direction) {
-    // Long-running directional bias on the palette anchor: forward warms the
-    // base hue, backward cools it. Jitter prevents it from feeling robotic.
     final jitter = (_rng.nextDouble() - 0.5) * 40.0;
-    var next = (_paletteAnchor + direction * 25.0 + jitter) % 360.0;
+    var next = (_paletteAnchor + direction * _kCommitWarmStep + jitter) % 360.0;
     if (next < 0) next += 360.0;
     _paletteAnchor = next;
-
-    final newPal = _generatePaletteFromAnchor(_paletteAnchor);
-
-    // Recent gesture speed sets the *base* fade duration: slow swipes get
-    // languid transitions, fast ones get snappier.
-    final speedT = (_recentSpeed / 600.0).clamp(0.0, 1.0);
-    final baseDurationS = 2.4 + (0.7 - 2.4) * speedT;
-
-    for (var i = 0; i < _anim.blobs.length; i++) {
-      final b = _anim.blobs[i];
-
-      // Freeze the currently interpolated colour as the new "from" so we
-      // never restart from a stale value mid-transition.
-      final fadeT = b.fadeDurationS > 0.0
-          ? ((_anim.elapsedS - b.fadeStartS) / b.fadeDurationS).clamp(0.0, 1.0)
-          : 1.0;
-      final easeT = Curves.easeInOutCubic.transform(fadeT);
-      final current = _hsvLerp(b.fromColor, b.toColor, easeT);
-
-      b.fromColor = current;
-      b.toColor = newPal[i];
-      // Per-blob stagger and ±30 % duration jitter so the four colours don't
-      // resolve in lock-step.
-      b.fadeStartS = _anim.elapsedS + i * 0.06;
-      b.fadeDurationS = baseDurationS * (0.7 + _rng.nextDouble() * 0.6);
-    }
   }
 
-  // --- Palette generation ----------------------------------------------------
+  // --- Colour ----------------------------------------------------------------
 
-  /// Build a four-colour palette with a chosen *harmony* (triadic + accent,
-  /// analogous, complementary pairs, split-complementary, monochromatic) and
-  /// a chosen *character* (vivid, dusty/desaturated, moody/darker).
-  List<HSVColor> _generatePaletteFromAnchor(double anchor) {
-    final char = _rng.nextDouble();
-    final double satMin, satMax, valMin, valMax;
-    if (char < 0.70) {
+  /// One colour from the evolving palette: a character band (vivid / dusty /
+  /// moody) and a hue near the anchor, with occasional complementary pops so
+  /// the field is cohesive but never monotone.
+  HSVColor _pickColor() {
+    final ch = _rng.nextDouble();
+    final double sMin, sMax, vMin, vMax;
+    if (ch < 0.70) {
       // vivid (most common)
-      satMin = 0.70;
-      satMax = 1.00;
-      valMin = 0.82;
-      valMax = 1.00;
-    } else if (char < 0.90) {
+      sMin = 0.70;
+      sMax = 1.00;
+      vMin = 0.82;
+      vMax = 1.00;
+    } else if (ch < 0.90) {
       // dusty / desaturated
-      satMin = 0.25;
-      satMax = 0.55;
-      valMin = 0.70;
-      valMax = 0.95;
+      sMin = 0.25;
+      sMax = 0.55;
+      vMin = 0.70;
+      vMax = 0.95;
     } else {
-      // moody (still saturated, a touch darker)
-      satMin = 0.65;
-      satMax = 0.95;
-      valMin = 0.55;
-      valMax = 0.80;
+      // moody (saturated, a touch darker)
+      sMin = 0.65;
+      sMax = 0.95;
+      vMin = 0.55;
+      vMax = 0.80;
     }
 
-    HSVColor mk(double hue) => HSVColor.fromAHSV(
-          1.0,
-          ((hue % 360.0) + 360.0) % 360.0,
-          satMin + _rng.nextDouble() * (satMax - satMin),
-          valMin + _rng.nextDouble() * (valMax - valMin),
-        );
-
-    final mode = _rng.nextDouble();
-    final List<double> offsets;
-    if (mode < 0.30) {
-      // triadic + analogous accent
-      offsets = [0.0, 120.0, 240.0, 30.0 + _rng.nextDouble() * 25.0];
-    } else if (mode < 0.55) {
-      // analogous, ~50° spread
-      offsets = const [-50.0, -16.67, 16.67, 50.0];
-    } else if (mode < 0.75) {
-      // complementary pairs
-      offsets = const [-10.0, 10.0, 170.0, 190.0];
-    } else if (mode < 0.90) {
-      // split-complementary
-      offsets = const [0.0, 30.0, 150.0, 210.0];
-    } else {
-      // monochromatic (variation comes from sat/val randomness)
-      offsets = const [0.0, 4.0, -4.0, 2.0];
-    }
-
-    return offsets.map((o) => mk(anchor + o)).toList();
+    // Harmony offsets from the anchor — weighted toward analogous hues with
+    // occasional triadic / complementary accents.
+    const offsets = <double>[
+      0, 0, 0, 30, -30, 45, -45, 60, -60, 120, -120, 180,
+    ];
+    final off = offsets[_rng.nextInt(offsets.length)] +
+        (_rng.nextDouble() - 0.5) * 16.0;
+    final hue = (((_paletteAnchor + off) % 360.0) + 360.0) % 360.0;
+    return HSVColor.fromAHSV(
+      1.0,
+      hue,
+      sMin + _rng.nextDouble() * (sMax - sMin),
+      vMin + _rng.nextDouble() * (vMax - vMin),
+    );
   }
 
   // --- Build -----------------------------------------------------------------
@@ -354,95 +353,55 @@ class _ColorArtScreenState extends State<ColorArtScreen>
     return RepaintBoundary(
       child: CustomPaint(
         size: Size.infinite,
-        painter: _CloudPainter(anim: _anim, repaint: _frame),
+        painter: _CloudPainter(scene: _scene, repaint: _frame),
       ),
     );
   }
 }
 
-/// HSV lerp that always takes the shortest path around the hue wheel, so
-/// crossfading from 350° to 10° passes through 0° (red) rather than through
-/// 180° (cyan).
-HSVColor _hsvLerp(HSVColor a, HSVColor b, double t) {
-  final h1 = ((a.hue % 360.0) + 360.0) % 360.0;
-  final h2 = ((b.hue % 360.0) + 360.0) % 360.0;
-  var diff = h2 - h1;
-  if (diff > 180.0) diff -= 360.0;
-  if (diff < -180.0) diff += 360.0;
-  final hue = ((h1 + diff * t) % 360.0 + 360.0) % 360.0;
-  return HSVColor.fromAHSV(
-    a.alpha + (b.alpha - a.alpha) * t,
-    hue,
-    a.saturation + (b.saturation - a.saturation) * t,
-    a.value + (b.value - a.value) * t,
-  );
-}
+// --- Data --------------------------------------------------------------------
 
 class _Blob {
-  double orbitPeriodS;
-  double orbitPhase;
-  double orbitRX;
-  double orbitRY;
-  double baseRadius;
-  double breathPeriodS;
-  double breathPhase;
+  Offset pos; // screen-space centre
+  double sizeTier; // 0 (smallest) .. 1 (largest); fixed per blob for even spread
 
-  /// Very slow secondary modulation period (~95–150 s); scales *both* the
-  /// radius and the orbit reach so the blob alternates coherently between
-  /// expansive (large + roaming) and intimate (small + near centre).
-  double moodPeriodS;
-  double moodPhase;
+  // Filled in by _refresh():
+  double radius = 1.0; // base radius (px), before breathing
+  HSVColor color = const HSVColor.fromAHSV(1, 0, 1, 1);
+  Offset ownVel = Offset.zero; // faint independent drift (px/s)
 
-  /// +1 (attract toward arm tip) or -1 (repel from tip). Re-randomised at
-  /// the start of every gesture, with a global mix-not-all-same constraint.
-  int magnetPolarity;
+  double breathPeriodS = 24.0; // radius breathing period
+  double breathPhase = 0.0;
 
-  /// Unsigned magnitude of the magnetic effect (0.08–0.18 in current tuning).
-  double magnetStrength;
+  double morphPeriodX = 30.0; // elliptical morph periods (x / y axes)
+  double morphPeriodY = 36.0;
+  double morphPhaseX = 0.0;
+  double morphPhaseY = 0.0;
+  double morphRot = 0.04; // slow rotation of the morph axes (rad/s)
+  double morphPhaseR = 0.0;
 
-  /// Smoothed magnetic displacement (lava-lamp tau = 2 s). The painter adds
-  /// this to the orbit-derived blob centre.
-  Offset magneticOffset;
+  _Blob({required this.pos, required this.sizeTier});
 
-  HSVColor fromColor;
-  HSVColor toColor;
-  double fadeStartS;
-  double fadeDurationS;
-
-  _Blob({
-    required this.orbitPeriodS,
-    required this.orbitPhase,
-    required this.orbitRX,
-    required this.orbitRY,
-    required this.baseRadius,
-    required this.breathPeriodS,
-    required this.breathPhase,
-    required this.moodPeriodS,
-    required this.moodPhase,
-    required this.magnetPolarity,
-    required this.magnetStrength,
-    required this.fromColor,
-    required this.toColor,
-    required this.fadeStartS,
-    required this.fadeDurationS,
-  }) : magneticOffset = Offset.zero;
+  /// Farthest the (breathing + morphing) blob can reach from [pos] — used for
+  /// off-screen testing and for placing a recycled blob fully outside.
+  double get maxExtent =>
+      radius * (1.0 + _kBreathAmp) * (1.0 + _kMorphAmp) * 1.06;
 }
 
-/// Shared mutable scratchpad — the State writes, the painter reads.
-class _Anim {
-  final List<_Blob> blobs;
+/// Shared scratch the State writes and the painter reads.
+class _Scene {
+  final List<_Blob> blobs = <_Blob>[];
   double elapsedS = 0.0;
-  double driftClock = 0.0;
   double hueDrift = 0.0;
-  Offset dragOffset = Offset.zero;
-  _Anim(this.blobs);
 }
+
+// --- Painter -----------------------------------------------------------------
 
 class _CloudPainter extends CustomPainter {
-  final _Anim anim;
+  final _Scene scene;
   final Listenable repaint;
 
-  _CloudPainter({required this.anim, required this.repaint})
+  _CloudPainter({required this.scene, required this.repaint})
       : super(repaint: repaint);
 
   @override
@@ -450,57 +409,56 @@ class _CloudPainter extends CustomPainter {
     // Pure black base.
     canvas.drawRect(Offset.zero & size, Paint()..color = Colors.black);
 
-    final c = Offset(size.width / 2, size.height / 2);
-    final shortest = size.shortestSide;
+    final t = scene.elapsedS;
+    final hueDrift = scene.hueDrift;
 
-    for (var i = 0; i < anim.blobs.length; i++) {
-      final b = anim.blobs[i];
+    for (final b in scene.blobs) {
+      // Colour: base hue plus the slow autonomous drift.
+      final shiftedHue = ((b.color.hue + hueDrift) % 360.0 + 360.0) % 360.0;
+      final color = b.color.withHue(shiftedHue).toColor();
 
-      // --- Position: Lissajous orbit (mood-scaled) + magnetic offset ----
-      final theta =
-          2 * math.pi * anim.driftClock / b.orbitPeriodS + b.orbitPhase;
-      final mood = math.sin(
-          2 * math.pi * anim.elapsedS / b.moodPeriodS + b.moodPhase);
-      final moodOrbitF = 1.0 + 0.25 * mood;
-      // 0.83 y-multiplier keeps the orbit from closing on itself, so each
-      // blob traces a slowly precessing path.
-      final orbit = Offset(
-        math.cos(theta) * size.width * b.orbitRX * moodOrbitF,
-        math.sin(theta * 0.83) * size.height * b.orbitRY * moodOrbitF,
-      );
-      final center = c + orbit + b.magneticOffset;
+      // Breathing radius — the single circle gently swells and shrinks.
+      final breath =
+          1.0 + _kBreathAmp * math.sin(2 * math.pi * t / b.breathPeriodS + b.breathPhase);
+      final r = (b.radius * breath).clamp(1.0, double.infinity).toDouble();
 
-      // --- Radius: breath × mood (both can be expansive simultaneously) -
-      final br =
-          2 * math.pi * anim.elapsedS / b.breathPeriodS + b.breathPhase;
-      final moodRF = 1.0 + 0.30 * mood;
-      final radius =
-          shortest * b.baseRadius * (1.0 + 0.25 * math.sin(br)) * moodRF;
+      // Subtle elliptical morph: independent per-axis squash + slow rotation.
+      final ax = 1.0 +
+          _kMorphAmp * math.sin(2 * math.pi * t / b.morphPeriodX + b.morphPhaseX);
+      final ay = 1.0 +
+          _kMorphAmp * math.sin(2 * math.pi * t / b.morphPeriodY + b.morphPhaseY);
+      final angle = b.morphRot * t + b.morphPhaseR;
 
-      // --- Colour: per-blob fade, then global hue drift ----------------
-      final fadeT = b.fadeDurationS > 0.0
-          ? ((anim.elapsedS - b.fadeStartS) / b.fadeDurationS).clamp(0.0, 1.0)
-          : 1.0;
-      final easeT = Curves.easeInOutCubic.transform(fadeT);
-      final base = _hsvLerp(b.fromColor, b.toColor, easeT);
-      final shiftedHue = ((base.hue + anim.hueDrift) % 360.0 + 360.0) % 360.0;
-      final color = base.withHue(shiftedHue).toColor();
+      // Big blobs render gentler so several broad masses don't wash to white;
+      // small dots stay punchy and richly saturated.
+      final alpha = _kCoreAlpha * (1.0 - _kBigDim * b.sizeTier);
 
-      // --- Draw radial gradient with screen blend ----------------------
+      // One soft radial gradient — a 3-stop falloff for a luminous, painterly
+      // core that fades smoothly to nothing (no hard edge, ever).
       final shader = RadialGradient(
-        colors: [color.withOpacity(0.78), color.withOpacity(0.0)],
-        stops: const [0.0, 1.0],
-      ).createShader(Rect.fromCircle(center: center, radius: radius));
+        colors: [
+          color.withValues(alpha: alpha),
+          color.withValues(alpha: alpha * 0.5),
+          color.withValues(alpha: 0.0),
+        ],
+        stops: const [0.0, 0.5, 1.0],
+      ).createShader(Rect.fromCircle(center: Offset.zero, radius: r));
 
-      canvas.drawCircle(
-        center,
-        radius,
-        Paint()
-          ..shader = shader
-          // screen preserves colour at overlaps (red + green = yellow, not
-          // white), which reads as painterly rather than stage-lit.
-          ..blendMode = BlendMode.screen,
-      );
+      final paint = Paint()
+        ..shader = shader
+        // screen preserves colour at overlaps (red + green = yellow), reading
+        // as painterly rather than stage-lit.
+        ..blendMode = BlendMode.screen;
+
+      // Draw the single gradient through the morph transform: translate to the
+      // blob centre, rotate, then scale the two axes differently so the round
+      // gradient becomes a gently morphing ellipse. Still one draw call.
+      canvas.save();
+      canvas.translate(b.pos.dx, b.pos.dy);
+      canvas.rotate(angle);
+      canvas.scale(ax, ay);
+      canvas.drawCircle(Offset.zero, r, paint);
+      canvas.restore();
     }
   }
 

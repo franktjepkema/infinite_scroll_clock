@@ -5,30 +5,25 @@ import 'package:flutter/scheduler.dart';
 
 import 'motion_controller.dart';
 
-/// Still Life mode.
+/// Still Life mode — "cloud + whirlwind".
 ///
-/// A from-scratch reconstruction of the surreal still-life render as a set of
-/// discrete 3-D **volumes**, rebuilt in the series' white-on-black house style
-/// (luminous, depth-shaded wireframe) and recomposed to read well on a tall
-/// portrait screen.
+/// The vocabulary of the original still-life render (cones, flared horns,
+/// spindle pods, teardrops, rods, balls, bars and knobbly nubs) is scattered as
+/// a slowly-tumbling **random cloud** of luminous wireframe volumes on pure
+/// black. At rest each object floats near its randomly-assigned home position,
+/// held there by a soft spring, turning gently on its own axes.
 ///
-/// The source tableau — a grey cone, a flared pink horn on a rod, a splayed
-/// cluster of green pods, a small spearhead, a hanging ring on a string, a ball
-/// on a needle, a tall colour bar, and a little nub on the floor — is rebuilt
-/// here with each object as its own [_Volume]: a centre, a scale, a base
-/// orientation, optional spin/wobble and style. Because every transform is
-/// mutable, individual objects can be picked and manipulated later; for now a
-/// swipe orbits the whole assembly and a light spring eases it back to a slowly
-/// breathing baseline (echoing the gentle turntable of the clip).
+/// **Interaction — the whirlwind.** A swipe pumps "energy" into the field. While
+/// that energy is high the objects are caught in a gentle vortex: a tangential
+/// swirl about the vertical axis, a little lift, and per-object turbulence, and
+/// every object tumbles faster. The energy then decays, the swirl fades, and the
+/// home-springs draw everything back — so the chaos blooms and then **settles**.
+/// Longer / faster swipes inject more energy (good for slow mechanical-arm
+/// swipes, which accumulate it steadily); the horizontal direction of the swipe
+/// sets the spin direction of the vortex.
 ///
-/// **Interaction.** The mechanical arm's horizontal motion yaws the scene, its
-/// vertical motion pitches it; both spring back toward the breathing baseline,
-/// so a long slow swipe turns the assembly to reveal the depth of the forms and
-/// then settles. The green pods carry a faint independent wobble so the cluster
-/// articulates like the limb in the source.
-///
-/// Rendering is orthographic (centres project to their intended screen spots
-/// when head-on) with additive white line-work over pure black.
+/// Rendering is orthographic with additive white line-work, depth-shaded per
+/// object, over a faint starfield and vignette — consistent with the series.
 class StillLifeScreen extends StatefulWidget {
   final MotionController motion;
   const StillLifeScreen({super.key, required this.motion});
@@ -39,24 +34,38 @@ class StillLifeScreen extends StatefulWidget {
 
 // --- Tuning ------------------------------------------------------------------
 
-// Camera spring (returns the assembly to the breathing baseline after a swipe).
-const double _kCamGain = 0.0015; // yaw/pitch velocity per px of drag
-const double _kCamReleaseGain = 0.00011; // extra kick per px/s on release
-const double _kCamStiff = 2.0;
-const double _kCamDamp = 1.35;
-const double _kCamMax = 0.7; // clamp on yaw/pitch (rad)
+// Cloud.
+const int _kCloudCount = 30; // number of objects in the cloud
 
-// Ambient idle turntable (subtle, like the clip).
-const double _kSwayYaw = 0.16; // rad
-const double _kSwayPitch = 0.05; // rad
-const double _kSwayFYaw = 0.06; // Hz-ish
-const double _kSwayFPitch = 0.045;
-const double _kPitchBias = -0.04; // look very slightly down
+// Home-spring (pulls each object back to rest -> "stabilize").
+const double _kSpring = 4.0; // restoring stiffness
+const double _kDamp = 1.6; // velocity damping
+const double _kVMax = 3.0; // clamp on object speed (normalised units/s)
+const double _kPosBound = 1.45; // soft world bound
 
-// Fit margins / scene extents (normalised units; portrait-tall composition).
+// Whirlwind (active in proportion to energy).
+const double _kSwirl = 6.0; // tangential vortex strength
+const double _kLift = 1.0; // upward lift
+const double _kTurb = 2.2; // per-object turbulence
+const double _kSpinBoost = 4.0; // how much faster objects tumble at full energy
+
+// Energy (pumped by swipes, decays on its own).
+const double _kEnergyTau = 2.5; // s — whirlwind persistence
+const double _kEnergyMax = 1.6;
+const double _kPump = 0.004; // energy per px of drag
+const double _kRelease = 0.0006; // energy per px/s of release velocity
+
+// Ambient camera sway (slow parallax so the cloud has depth, not gesture-bound).
+const double _kSwayYaw = 0.12;
+const double _kSwayPitch = 0.05;
+const double _kSwayFYaw = 0.05;
+const double _kSwayFPitch = 0.037;
+const double _kPitchBias = -0.03;
+
+// Fit.
 const double _kFitMargin = 0.94;
-const double _kSceneHalfW = 0.62;
-const double _kSceneHalfH = 0.98;
+const double _kSceneHalfW = 0.66;
+const double _kSceneHalfH = 1.04;
 
 const int _kStarCount = 70;
 
@@ -66,20 +75,20 @@ class _StillLifeScreenState extends State<StillLifeScreen>
   final ValueNotifier<int> _frame = ValueNotifier<int>(0);
   final math.Random _rng = math.Random();
 
-  late final List<_Volume> _scene;
+  late final List<_Volume> _cloud;
   late final List<_Star> _stars;
 
-  double _yaw = 0.0, _pitch = 0.0;
-  double _yawVel = 0.0, _pitchVel = 0.0;
+  double _energy = 0.0; // whirlwind energy
+  double _swirlSign = 1.0; // vortex direction (set by horizontal swipe)
   double _elapsed = 0.0, _prevS = 0.0;
   int _lastTick = -1;
 
   @override
   void initState() {
     super.initState();
-    _scene = _buildScene();
-    for (final v in _scene) {
-      v.bake(); // precompute static geometry once (no per-frame allocation)
+    _cloud = _buildCloud(_rng);
+    for (final o in _cloud) {
+      o.bake();
     }
     _stars = List.generate(
       _kStarCount,
@@ -111,157 +120,154 @@ class _StillLifeScreenState extends State<StillLifeScreen>
     super.dispose();
   }
 
-  // --- Scene graph -----------------------------------------------------------
+  // --- Cloud generation ------------------------------------------------------
   //
-  // Normalised coordinates: origin at composition centre, +y up, +z toward the
-  // viewer. Recomposed taller-than-wide for a portrait screen.
+  // Normalised coordinates: origin at centre, +y up, +z toward the viewer.
 
-  List<_Volume> _buildScene() {
-    final s = <_Volume>[];
+  /// Centre-weighted "gaussian-ish" sample in roughly [-1, 1].
+  double _g() =>
+      (_rng.nextDouble() + _rng.nextDouble() + _rng.nextDouble() - 1.5) / 1.5;
 
-    // Faint floor ellipse to ground the assembly (a ring laid flat in XZ).
-    s.add(_Volume.ring(
-      center: const _V3(0, -0.74, 0),
-      scale: const _V3(0.5, 0.5, 1),
-      rx: math.pi / 2, // lay it down
-      seg: 56,
-      bright: 0.13,
-    ));
+  double _signed(double lo, double hi) =>
+      (_rng.nextBool() ? 1.0 : -1.0) * (lo + _rng.nextDouble() * (hi - lo));
 
-    // The grey cone — the vertical spine, upper-centre, slightly tilted.
-    s.add(_Volume.lathe(
-      profile: _coneProfile,
-      center: const _V3(0.02, 0.16, -0.02),
-      scale: const _V3(0.24, 0.5, 0.24),
-      rz: -0.12,
-      seg: 24,
-      bright: 0.5,
-      glow: true,
-    ));
+  List<_Volume> _buildCloud(math.Random rng) {
+    // Weighted palette of object kinds (the still-life vocabulary).
+    const palette = <String>[
+      'pod', 'pod', 'pod', 'pod', 'pod', 'pod', //
+      'spear', 'spear', 'spear', 'spear', //
+      'stick', 'stick', 'stick', 'stick', //
+      'cone', 'cone', 'cone', //
+      'ball', 'ball', 'ball', //
+      'nub', 'nub', 'nub', //
+      'ring', 'ring', 'ring', //
+      'horn', 'horn', //
+      'box', 'box', //
+    ];
 
-    // The flared pink horn, left, opening toward the viewer; on a rod.
-    s.add(_Volume.lathe(
-      profile: _hornProfile,
-      center: const _V3(-0.34, 0.04, 0.06),
-      scale: const _V3(0.22, 0.24, 0.22),
-      rz: 1.45, // axis points to -x: the bell opens left/front
-      ry: 0.35,
-      seg: 16,
-      bright: 0.55,
-      glow: true,
-    ));
+    final list = <_Volume>[];
+    for (var i = 0; i < _kCloudCount; i++) {
+      final type = palette[rng.nextInt(palette.length)];
+      final o = _Volume();
+      _configureType(o, type, rng);
 
-    // Rod skewering the horn, running up to the spearhead (explicit segment).
-    s.add(_Volume.segment(
-      a: const _V3(-0.30, 0.05, 0.06),
-      b: const _V3(0.27, 0.45, 0.0),
-      bright: 0.45,
-      glow: true,
-    ));
+      // Random home in a centre-weighted cloud, taller than wide (portrait).
+      o.hx = (_g() * 0.42).clamp(-0.52, 0.52).toDouble();
+      o.hy = (_g() * 0.62).clamp(-0.92, 0.92).toDouble();
+      o.hz = (_g() * 0.26).clamp(-0.34, 0.34).toDouble();
+      o.px = o.hx;
+      o.py = o.hy;
+      o.pz = o.hz;
 
-    // The splayed green pod cluster, radiating from a joint on the right.
-    const joint = _V3(0.18, -0.04, 0.06);
-    const podAngles = <double>[0.55, 0.22, -0.10, -0.55, -1.05]; // from +x, rad
-    const podLens = <double>[0.20, 0.23, 0.22, 0.21, 0.18];
-    for (var i = 0; i < podAngles.length; i++) {
-      final ang = podAngles[i];
-      final len = podLens[i];
-      final dir = _V3(math.cos(ang), math.sin(ang), 0);
-      final center = _V3(
-        joint.x + dir.x * len * 0.9,
-        joint.y + dir.y * len * 0.9,
-        joint.z + (i.isEven ? 0.04 : -0.04),
-      );
-      s.add(_Volume.lathe(
-        profile: _podProfile,
-        center: center,
-        scale: _V3(0.055, len, 0.055),
-        rz: ang - math.pi / 2, // pod long-axis (model +y) points along dir
-        rx: (i.isEven ? 0.18 : -0.14), // small out-of-plane spread
-        seg: 12,
-        bright: 0.5,
-        wobbleAmp: 0.06,
-        wobbleRate: 0.5 + i * 0.07,
-        wobblePhase: i * 1.3,
-        wobbleAxis: 2, // gentle articulation about the splay axis
-      ));
+      // Random initial orientation + gentle idle tumble.
+      o.ax = rng.nextDouble() * 2 * math.pi;
+      o.ay = rng.nextDouble() * 2 * math.pi;
+      o.axRate = _signed(0.05, 0.22);
+      o.ayRate = _signed(0.05, 0.22);
+
+      // Per-object turbulence character.
+      o.f1 = 0.5 + rng.nextDouble() * 0.9;
+      o.f2 = 0.5 + rng.nextDouble() * 0.9;
+      o.f3 = 0.5 + rng.nextDouble() * 0.9;
+      o.ph1 = rng.nextDouble() * 6.283;
+      o.ph2 = rng.nextDouble() * 6.283;
+      o.ph3 = rng.nextDouble() * 6.283;
+
+      o.bright = 0.45 + rng.nextDouble() * 0.25;
+      o.glow = rng.nextDouble() < 0.45;
+
+      list.add(o);
     }
-
-    // Small spearhead / spinning teardrop at the top of the rod.
-    s.add(_Volume.lathe(
-      profile: _spearProfile,
-      center: const _V3(0.28, 0.49, 0.0),
-      scale: const _V3(0.06, 0.12, 0.06),
-      rz: 0.2,
-      seg: 14,
-      bright: 0.6,
-      spinYRate: 0.6, // it slowly spins like a top
-      glow: true,
-    ));
-
-    // Hanging ring on a string, top-centre.
-    s.add(_Volume.segment(
-      a: const _V3(0.0, 0.93, 0.0),
-      b: const _V3(0.0, 0.66, 0.0),
-      bright: 0.5,
-      glow: true,
-    ));
-    s.add(_Volume.ring(
-      center: const _V3(0.0, 0.61, 0.02),
-      scale: const _V3(0.055, 0.055, 1),
-      rx: 0.25,
-      seg: 40,
-      bright: 0.7,
-      glow: true,
-    ));
-
-    // Ball on a needle, upper-right.
-    s.add(_Volume.segment(
-      a: const _V3(0.22, 0.60, 0.0),
-      b: const _V3(0.38, 0.60, 0.0),
-      bright: 0.45,
-    ));
-    s.add(_Volume.sphere(
-      center: const _V3(0.43, 0.60, 0.0),
-      scale: const _V3(0.05, 0.05, 0.05),
-      lon: 12,
-      lat: 7,
-      bright: 0.7,
-      glow: true,
-    ));
-
-    // Tall colour-bar, recast as a slim luminous prism with two dividers, right.
-    s.add(_Volume.box(
-      center: const _V3(0.47, 0.06, -0.04),
-      scale: const _V3(0.045, 0.42, 0.03),
-      divs: 2,
-      bright: 0.55,
-      glow: true,
-    ));
-
-    // The little nub on the floor, lower-left (a small knobbly icosahedron).
-    s.add(_Volume.icosa(
-      center: const _V3(-0.30, -0.62, 0.10),
-      scale: const _V3(0.085, 0.065, 0.075),
-      bright: 0.5,
-      spinYRate: 0.18,
-      glow: true,
-    ));
-
-    return s;
+    return list;
   }
 
-  // --- Gesture (orbit the assembly) ------------------------------------------
+  /// Set geometry + size for a given object type.
+  void _configureType(_Volume o, String type, math.Random rng) {
+    double r() => rng.nextDouble();
+    switch (type) {
+      case 'pod':
+        o.kind = _Kind.lathe;
+        o.profile = _podProfile;
+        o.seg = 10;
+        final rad = 0.045 + r() * 0.02;
+        o.setScale(rad, 0.07 + r() * 0.06, rad);
+        break;
+      case 'spear':
+        o.kind = _Kind.lathe;
+        o.profile = _spearProfile;
+        o.seg = 10;
+        final rad = 0.05 + r() * 0.02;
+        o.setScale(rad, 0.06 + r() * 0.05, rad);
+        break;
+      case 'stick':
+        o.kind = _Kind.lathe;
+        o.profile = _stickProfile;
+        o.seg = 8;
+        final rad = 0.05 + r() * 0.02;
+        o.setScale(rad, 0.06 + r() * 0.07, rad);
+        break;
+      case 'cone':
+        o.kind = _Kind.lathe;
+        o.profile = _coneProfile;
+        o.seg = 14;
+        final rad = 0.06 + r() * 0.03;
+        o.setScale(rad, 0.09 + r() * 0.05, rad);
+        break;
+      case 'horn':
+        o.kind = _Kind.lathe;
+        o.profile = _hornProfile;
+        o.seg = 12;
+        final rad = 0.10 + r() * 0.04;
+        o.setScale(rad, 0.10 + r() * 0.04, rad);
+        o.glowBiasHigh = true;
+        break;
+      case 'ball':
+        o.kind = _Kind.sphere;
+        o.lon = 10;
+        o.lat = 6;
+        final rad = 0.045 + r() * 0.03;
+        o.setScale(rad, rad, rad);
+        break;
+      case 'ring':
+        o.kind = _Kind.ring;
+        o.seg = 28;
+        final rad = 0.05 + r() * 0.04;
+        o.setScale(rad, rad, rad);
+        break;
+      case 'box':
+        o.kind = _Kind.box;
+        o.divs = r() < 0.5 ? 1 : 0;
+        o.setScale(0.04 + r() * 0.02, 0.10 + r() * 0.06, 0.03 + r() * 0.02);
+        break;
+      case 'nub':
+      default:
+        o.kind = _Kind.icosa;
+        final rad = 0.05 + r() * 0.03;
+        // Slightly irregular so it reads as a knobbly lump.
+        o.setScale(rad * (0.8 + r() * 0.4), rad * (0.8 + r() * 0.4),
+            rad * (0.8 + r() * 0.4));
+        break;
+    }
+  }
+
+  // --- Gesture (pump the whirlwind) ------------------------------------------
 
   void _onMotion() {
     final m = widget.motion;
     if (m.isDragging && m.updateTick != _lastTick) {
       _lastTick = m.updateTick;
-      _yawVel += m.liveDelta.dx * _kCamGain;
-      _pitchVel += -m.liveDelta.dy * _kCamGain;
+      _energy =
+          (_energy + m.liveDelta.distance * _kPump).clamp(0.0, _kEnergyMax).toDouble();
+      if (m.liveDelta.dx.abs() > 0.01) {
+        _swirlSign = m.liveDelta.dx > 0 ? 1.0 : -1.0;
+      }
     } else if (!m.isDragging && m.velocity != Offset.zero) {
-      _yawVel += m.velocity.dx * _kCamReleaseGain;
-      _pitchVel += -m.velocity.dy * _kCamReleaseGain;
+      _energy = (_energy + m.velocity.distance * _kRelease)
+          .clamp(0.0, _kEnergyMax)
+          .toDouble();
+      if (m.velocity.dx.abs() > 1.0) {
+        _swirlSign = m.velocity.dx > 0 ? 1.0 : -1.0;
+      }
     }
   }
 
@@ -273,16 +279,66 @@ class _StillLifeScreenState extends State<StillLifeScreen>
     _prevS = t;
     _elapsed = t;
 
-    // Breathing baseline (a slow, shallow turntable) the camera springs toward.
-    final yawTarget = _kSwayYaw * math.sin(t * _kSwayFYaw * 2 * math.pi);
-    final pitchTarget =
-        _kPitchBias + _kSwayPitch * math.sin(t * _kSwayFPitch * 2 * math.pi);
+    // Whirlwind energy decays toward calm.
+    _energy *= math.exp(-dt / _kEnergyTau);
+    final e = _energy;
+    final spinBoost = 1.0 + e * _kSpinBoost;
 
-    _yawVel += (-_kCamStiff * (_yaw - yawTarget) - _kCamDamp * _yawVel) * dt;
-    _pitchVel +=
-        (-_kCamStiff * (_pitch - pitchTarget) - _kCamDamp * _pitchVel) * dt;
-    _yaw = (_yaw + _yawVel * dt).clamp(-_kCamMax, _kCamMax).toDouble();
-    _pitch = (_pitch + _pitchVel * dt).clamp(-_kCamMax, _kCamMax).toDouble();
+    for (final o in _cloud) {
+      // Tangential swirl about the vertical (Y) axis: t = (-z, 0, x).
+      final tx = -o.pz, tz = o.px;
+
+      // Per-object turbulence (only meaningful while energy is high).
+      final turbX = math.sin(t * o.f1 + o.ph1);
+      final turbY = math.sin(t * o.f2 + o.ph2);
+      final turbZ = math.cos(t * o.f3 + o.ph3);
+
+      // Acceleration = home-spring + damping + (energy * vortex).
+      final ax = _kSpring * (o.hx - o.px) -
+          _kDamp * o.vx +
+          e * (_swirlSign * _kSwirl * tx + _kTurb * turbX);
+      final ay = _kSpring * (o.hy - o.py) -
+          _kDamp * o.vy +
+          e * (_kLift + _kTurb * turbY);
+      final az = _kSpring * (o.hz - o.pz) -
+          _kDamp * o.vz +
+          e * (_swirlSign * _kSwirl * tz + _kTurb * turbZ);
+
+      o.vx += ax * dt;
+      o.vy += ay * dt;
+      o.vz += az * dt;
+
+      // Clamp speed for stability under sustained swiping.
+      final sp = math.sqrt(o.vx * o.vx + o.vy * o.vy + o.vz * o.vz);
+      if (sp > _kVMax) {
+        final k = _kVMax / sp;
+        o.vx *= k;
+        o.vy *= k;
+        o.vz *= k;
+      }
+
+      o.px += o.vx * dt;
+      o.py += o.vy * dt;
+      o.pz += o.vz * dt;
+
+      // Soft world bounds: stop a component at the wall.
+      if (o.px.abs() > _kPosBound) {
+        o.px = o.px.clamp(-_kPosBound, _kPosBound).toDouble();
+        o.vx = 0;
+      }
+      if (o.py.abs() > _kPosBound) {
+        o.py = o.py.clamp(-_kPosBound, _kPosBound).toDouble();
+        o.vy = 0;
+      }
+      if (o.pz.abs() > _kPosBound) {
+        o.pz = o.pz.clamp(-_kPosBound, _kPosBound).toDouble();
+        o.vz = 0;
+      }
+
+      // Tumble — faster mid-whirlwind, back to a gentle idle as it settles.
+      o.ax += o.axRate * spinBoost * dt;
+      o.ay += o.ayRate * spinBoost * dt;
+    }
 
     _frame.value += 1;
   }
@@ -294,12 +350,10 @@ class _StillLifeScreenState extends State<StillLifeScreen>
     return RepaintBoundary(
       child: CustomPaint(
         size: Size.infinite,
-        painter: _StillLifePainter(
-          scene: _scene,
+        painter: _CloudPainter(
+          cloud: _cloud,
           stars: _stars,
           repaint: _frame,
-          yawOf: () => _yaw,
-          pitchOf: () => _pitch,
           timeOf: () => _elapsed,
         ),
       ),
@@ -307,7 +361,7 @@ class _StillLifeScreenState extends State<StillLifeScreen>
   }
 }
 
-// --- Lathe profiles ([radius, y]; revolved around the Y axis) ----------------
+// --- Lathe profiles ([radius, y]; revolved around Y) -------------------------
 
 const List<List<double>> _coneProfile = [
   [0.0, 1.0],
@@ -341,6 +395,11 @@ const List<List<double>> _spearProfile = [
   [0.0, -1.0],
 ];
 
+const List<List<double>> _stickProfile = [
+  [0.07, -1.0],
+  [0.07, 1.0],
+];
+
 // --- Data --------------------------------------------------------------------
 
 class _V3 {
@@ -348,179 +407,47 @@ class _V3 {
   const _V3(this.x, this.y, this.z);
 }
 
-enum _Kind { lathe, box, sphere, ring, segment, icosa }
+enum _Kind { lathe, box, sphere, ring, icosa }
 
-/// A single manipulable element. Centre / scale / orientation / spin / wobble
-/// are mutable so future code can grab one object and move, scale, turn or
-/// animate it independently.
+/// One cloud object: geometry + size + full dynamic state (home, position,
+/// velocity, tumble). Every field is mutable so the physics can drive it and so
+/// individual objects can be manipulated later.
 class _Volume {
-  final _Kind kind;
-  _V3 center;
-  _V3 scale; // (rx, ry, rz) normalised
-  double rx, ry, rz; // base Euler orientation (roll Z, pitch X, yaw Y)
-  double spinYRate; // continuous self-rotation about Y
-  double wobbleAmp, wobbleRate, wobblePhase;
-  int wobbleAxis; // 0=x, 1=y, 2=z
-
-  // Segment endpoints (world, normalised) — used only by _Kind.segment.
-  _V3 a, b;
-
-  // Style.
-  double bright, lineW;
-  bool glow, dashed;
+  _Kind kind = _Kind.icosa;
 
   // Geometry params.
-  List<List<double>> profile;
-  int seg, lon, lat, divs;
+  List<List<double>> profile = const [];
+  int seg = 16, lon = 10, lat = 6, divs = 0;
 
-  // Baked geometry (filled once by [bake]).
+  // Size (rx, ry, rz).
+  double sx = 0.05, sy = 0.05, sz = 0.05;
+
+  // Dynamic state.
+  double hx = 0, hy = 0, hz = 0; // home
+  double px = 0, py = 0, pz = 0; // position
+  double vx = 0, vy = 0, vz = 0; // velocity
+  double ax = 0, ay = 0; // tumble angles
+  double axRate = 0, ayRate = 0; // idle tumble rates
+
+  // Turbulence character.
+  double f1 = 1, f2 = 1, f3 = 1, ph1 = 0, ph2 = 0, ph3 = 0;
+
+  // Style.
+  double bright = 0.5;
+  double lineW = 1.0;
+  bool glow = false;
+  bool glowBiasHigh = false; // unused hook; kept for tuning per type
+
+  // Baked geometry.
   List<_V3> verts = const [];
   List<int> edges = const [];
 
-  _Volume._({
-    required this.kind,
-    required this.center,
-    required this.scale,
-    this.rx = 0.0,
-    this.ry = 0.0,
-    this.rz = 0.0,
-    this.spinYRate = 0.0,
-    this.wobbleAmp = 0.0,
-    this.wobbleRate = 0.0,
-    this.wobblePhase = 0.0,
-    this.wobbleAxis = 0,
-    this.a = const _V3(0, 0, 0),
-    this.b = const _V3(0, 0, 0),
-    this.bright = 0.5,
-    this.lineW = 1.0,
-    this.glow = false,
-    this.dashed = false,
-    this.profile = const [],
-    this.seg = 24,
-    this.lon = 12,
-    this.lat = 7,
-    this.divs = 0,
-  });
+  void setScale(double x, double y, double z) {
+    sx = x;
+    sy = y;
+    sz = z;
+  }
 
-  factory _Volume.lathe({
-    required List<List<double>> profile,
-    required _V3 center,
-    required _V3 scale,
-    double rx = 0.0,
-    double ry = 0.0,
-    double rz = 0.0,
-    int seg = 20,
-    double bright = 0.5,
-    double spinYRate = 0.0,
-    double wobbleAmp = 0.0,
-    double wobbleRate = 0.0,
-    double wobblePhase = 0.0,
-    int wobbleAxis = 0,
-    bool glow = false,
-  }) =>
-      _Volume._(
-        kind: _Kind.lathe,
-        center: center,
-        scale: scale,
-        rx: rx,
-        ry: ry,
-        rz: rz,
-        seg: seg,
-        bright: bright,
-        spinYRate: spinYRate,
-        wobbleAmp: wobbleAmp,
-        wobbleRate: wobbleRate,
-        wobblePhase: wobblePhase,
-        wobbleAxis: wobbleAxis,
-        glow: glow,
-        profile: profile,
-      );
-
-  factory _Volume.box({
-    required _V3 center,
-    required _V3 scale,
-    int divs = 0,
-    double bright = 0.5,
-    bool glow = false,
-  }) =>
-      _Volume._(
-        kind: _Kind.box,
-        center: center,
-        scale: scale,
-        divs: divs,
-        bright: bright,
-        glow: glow,
-      );
-
-  factory _Volume.sphere({
-    required _V3 center,
-    required _V3 scale,
-    int lon = 12,
-    int lat = 7,
-    double bright = 0.5,
-    bool glow = false,
-  }) =>
-      _Volume._(
-        kind: _Kind.sphere,
-        center: center,
-        scale: scale,
-        lon: lon,
-        lat: lat,
-        bright: bright,
-        glow: glow,
-      );
-
-  factory _Volume.ring({
-    required _V3 center,
-    required _V3 scale,
-    double rx = 0.0,
-    int seg = 48,
-    double bright = 0.5,
-    bool glow = false,
-  }) =>
-      _Volume._(
-        kind: _Kind.ring,
-        center: center,
-        scale: scale,
-        rx: rx,
-        seg: seg,
-        bright: bright,
-        glow: glow,
-      );
-
-  factory _Volume.segment({
-    required _V3 a,
-    required _V3 b,
-    double bright = 0.5,
-    bool glow = false,
-  }) =>
-      _Volume._(
-        kind: _Kind.segment,
-        center: const _V3(0, 0, 0),
-        scale: const _V3(1, 1, 1),
-        a: a,
-        b: b,
-        bright: bright,
-        glow: glow,
-      );
-
-  factory _Volume.icosa({
-    required _V3 center,
-    required _V3 scale,
-    double bright = 0.5,
-    double spinYRate = 0.0,
-    bool glow = false,
-  }) =>
-      _Volume._(
-        kind: _Kind.icosa,
-        center: center,
-        scale: scale,
-        bright: bright,
-        spinYRate: spinYRate,
-        glow: glow,
-      );
-
-  /// Precompute the static unit geometry for this volume's kind.
   void bake() {
     switch (kind) {
       case _Kind.lathe:
@@ -548,10 +475,6 @@ class _Volume {
         verts = g.v;
         edges = g.e;
         break;
-      case _Kind.segment:
-        verts = [a, b];
-        edges = const [0, 1];
-        break;
     }
   }
 }
@@ -563,19 +486,15 @@ class _Star {
 
 // --- Painter -----------------------------------------------------------------
 
-class _StillLifePainter extends CustomPainter {
-  final List<_Volume> scene;
+class _CloudPainter extends CustomPainter {
+  final List<_Volume> cloud;
   final List<_Star> stars;
-  final double Function() yawOf;
-  final double Function() pitchOf;
   final double Function() timeOf;
 
-  _StillLifePainter({
-    required this.scene,
+  _CloudPainter({
+    required this.cloud,
     required this.stars,
     required Listenable repaint,
-    required this.yawOf,
-    required this.pitchOf,
     required this.timeOf,
   }) : super(repaint: repaint);
 
@@ -584,23 +503,24 @@ class _StillLifePainter extends CustomPainter {
     canvas.drawRect(Offset.zero & size, Paint()..color = Colors.black);
 
     final cx = size.width / 2, cy = size.height / 2;
-    final halfW = size.width / 2, halfH = size.height / 2;
-    // Uniform fit keeps the portrait composition's aspect on any screen.
     final s = math.min(
-      halfW * _kFitMargin / _kSceneHalfW,
-      halfH * _kFitMargin / _kSceneHalfH,
+      (size.width / 2) * _kFitMargin / _kSceneHalfW,
+      (size.height / 2) * _kFitMargin / _kSceneHalfH,
     );
 
     _paintStars(canvas, size);
     _paintVignette(canvas, size, cx, cy);
 
+    // Slow ambient camera sway (parallax only — gestures drive the whirlwind).
     final t = timeOf();
-    final yaw = yawOf(), pitch = pitchOf();
+    final yaw = _kSwayYaw * math.sin(t * _kSwayFYaw * 2 * math.pi);
+    final pitch =
+        _kPitchBias + _kSwayPitch * math.sin(t * _kSwayFPitch * 2 * math.pi);
     final cyaw = math.cos(yaw), syaw = math.sin(yaw);
     final cpit = math.cos(pitch), spit = math.sin(pitch);
 
-    for (final v in scene) {
-      _drawVolume(canvas, v, t, cx, cy, s, cyaw, syaw, cpit, spit);
+    for (final o in cloud) {
+      _drawObject(canvas, o, cx, cy, s, cyaw, syaw, cpit, spit);
     }
   }
 
@@ -629,93 +549,65 @@ class _StillLifePainter extends CustomPainter {
     );
   }
 
-  // --- One volume ------------------------------------------------------------
-
-  void _drawVolume(Canvas canvas, _Volume v, double t, double cx, double cy,
-      double s, double cyaw, double syaw, double cpit, double spit) {
-    final n = v.verts.length;
+  void _drawObject(Canvas canvas, _Volume o, double cx, double cy, double s,
+      double cyaw, double syaw, double cpit, double spit) {
+    final n = o.verts.length;
     if (n == 0) return;
+
+    final cax = math.cos(o.ax), sax = math.sin(o.ax);
+    final cay = math.cos(o.ay), say = math.sin(o.ay);
 
     final px = List<double>.filled(n, 0.0);
     final py = List<double>.filled(n, 0.0);
     final pd = List<double>.filled(n, 0.0);
 
-    // Per-volume base orientation (with optional wobble + continuous spin).
-    var rx = v.rx, ry = v.ry + v.spinYRate * t, rz = v.rz;
-    if (v.wobbleAmp != 0.0) {
-      final w = v.wobbleAmp * math.sin(t * v.wobbleRate + v.wobblePhase);
-      if (v.wobbleAxis == 0) {
-        rx += w;
-      } else if (v.wobbleAxis == 1) {
-        ry += w;
-      } else {
-        rz += w;
-      }
-    }
-    final crz = math.cos(rz), srz = math.sin(rz);
-    final crx = math.cos(rx), srx = math.sin(rx);
-    final cry = math.cos(ry), sry = math.sin(ry);
-
-    final isSeg = v.kind == _Kind.segment;
-
     for (var i = 0; i < n; i++) {
-      double wx, wy, wz;
-      if (isSeg) {
-        // Segment vertices are already in world space.
-        wx = v.verts[i].x;
-        wy = v.verts[i].y;
-        wz = v.verts[i].z;
-      } else {
-        final m = v.verts[i];
-        var x = m.x * v.scale.x, y = m.y * v.scale.y, z = m.z * v.scale.z;
-        // roll (Z)
-        final x1 = x * crz - y * srz;
-        final y1 = x * srz + y * crz;
-        // pitch (X)
-        final y2 = y1 * crx - z * srx;
-        final z1 = y1 * srx + z * crx;
-        // yaw (Y)
-        final x2 = x1 * cry + z1 * sry;
-        final z2 = -x1 * sry + z1 * cry;
-        wx = x2 + v.center.x;
-        wy = y2 + v.center.y;
-        wz = z2 + v.center.z;
-      }
-      // Camera yaw (Y) then pitch (X).
+      final m = o.verts[i];
+      // scale
+      var x = m.x * o.sx, y = m.y * o.sy, z = m.z * o.sz;
+      // tumble: rotate X then Y
+      final y1 = y * cax - z * sax;
+      final z1 = y * sax + z * cax;
+      final x1 = x;
+      final x2 = x1 * cay + z1 * say;
+      final z2 = -x1 * say + z1 * cay;
+      final y2 = y1;
+      // translate to current position
+      final wx = x2 + o.px;
+      final wy = y2 + o.py;
+      final wz = z2 + o.pz;
+      // camera yaw then pitch
       final camX = wx * cyaw + wz * syaw;
       final camZ = -wx * syaw + wz * cyaw;
       final camY2 = wy * cpit - camZ * spit;
       final camZ2 = wy * spit + camZ * cpit;
-      // Orthographic projection (+y up -> screen y down).
+      // orthographic projection (+y up -> screen y down)
       px[i] = cx + camX * s;
       py[i] = cy - camY2 * s;
       pd[i] = camZ2;
     }
 
-    final depthScale = math.max(
-        0.05,
-        math.max(v.scale.x.abs(), math.max(v.scale.y.abs(), v.scale.z.abs())));
+    final depthScale =
+        math.max(0.05, math.max(o.sx.abs(), math.max(o.sy.abs(), o.sz.abs())));
 
     final base = Paint()
       ..blendMode = BlendMode.plus
       ..isAntiAlias = true
       ..strokeCap = StrokeCap.round
-      ..strokeWidth = v.lineW;
+      ..strokeWidth = o.lineW;
     final wide = Paint()
       ..blendMode = BlendMode.plus
       ..isAntiAlias = true
-      ..strokeWidth = v.lineW + 2.0;
+      ..strokeWidth = o.lineW + 2.0;
 
-    final e = v.edges;
+    final e = o.edges;
     for (var k = 0; k < e.length; k += 2) {
       final a = e[k], b = e[k + 1];
       final depth = (pd[a] + pd[b]) * 0.5;
-      final d = isSeg
-          ? 1.0
-          : (0.5 + 0.5 * depth / depthScale).clamp(0.0, 1.0).toDouble();
-      final alpha = v.bright * (0.42 + 0.58 * d);
+      final d = (0.5 + 0.5 * depth / depthScale).clamp(0.0, 1.0).toDouble();
+      final alpha = o.bright * (0.42 + 0.58 * d);
       final p1 = Offset(px[a], py[a]), p2 = Offset(px[b], py[b]);
-      if (v.glow) {
+      if (o.glow) {
         wide.color = Colors.white.withValues(alpha: alpha * 0.26);
         canvas.drawLine(p1, p2, wide);
       }
@@ -725,7 +617,7 @@ class _StillLifePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _StillLifePainter old) => true;
+  bool shouldRepaint(covariant _CloudPainter old) => true;
 }
 
 // --- Geometry builders -------------------------------------------------------
@@ -745,13 +637,13 @@ _Geom _latheGeom(List<List<double>> prof, int seg) {
   final e = <int>[];
   for (var i = 0; i < P - 1; i++) {
     for (var j = 0; j < seg; j++) {
-      e..add(idx(i, j))..add(idx(i + 1, j)); // lengthwise
+      e..add(idx(i, j))..add(idx(i + 1, j));
     }
   }
   for (var i = 0; i < P; i++) {
-    if (prof[i][0] <= 1e-6) continue; // skip degenerate (tip) rings
+    if (prof[i][0] <= 1e-6) continue;
     for (var j = 0; j < seg; j++) {
-      e..add(idx(i, j))..add(idx(i, j + 1)); // ring
+      e..add(idx(i, j))..add(idx(i, j + 1));
     }
   }
   return _Geom(v, e);
@@ -766,22 +658,26 @@ _Geom _boxGeom(int divs) {
     const _V3(1, 1, 1), const _V3(-1, 1, 1),
   ];
   final e = <int>[
-    0, 1, 1, 2, 2, 3, 3, 0, // back face
-    4, 5, 5, 6, 6, 7, 7, 4, // front face
-    0, 4, 1, 5, 2, 6, 3, 7, // verticals
+    0, 1, 1, 2, 2, 3, 3, 0,
+    4, 5, 5, 6, 6, 7, 7, 4,
+    0, 4, 1, 5, 2, 6, 3, 7,
   ];
   for (var k = 1; k <= divs; k++) {
     final y = -1 + 2 * k / (divs + 1);
-    final base = v.length;
-    v..add(_V3(-1, y, -1))..add(_V3(1, y, -1))..add(_V3(1, y, 1))..add(_V3(-1, y, 1));
+    final b = v.length;
+    v
+      ..add(_V3(-1, y, -1))
+      ..add(_V3(1, y, -1))
+      ..add(_V3(1, y, 1))
+      ..add(_V3(-1, y, 1));
     e
-      ..addAll([base, base + 1, base + 1, base + 2])
-      ..addAll([base + 2, base + 3, base + 3, base]);
+      ..addAll([b, b + 1, b + 1, b + 2])
+      ..addAll([b + 2, b + 3, b + 3, b]);
   }
   return _Geom(v, e);
 }
 
-/// Unit UV-sphere: `lon` meridians × `lat` bands. Poles are coincident points.
+/// Unit UV-sphere: `lon` meridians × `lat` bands.
 _Geom _sphereGeom(int lon, int lat) {
   final v = <_V3>[];
   for (var i = 0; i <= lat; i++) {
@@ -821,7 +717,7 @@ _Geom _ringGeom(int seg) {
   return _Geom(v, e);
 }
 
-/// Unit icosahedron (12 vertices), edges found by shortest-distance pairing.
+/// Unit icosahedron (12 vertices), edges via shortest-distance pairing.
 _Geom _icosaGeom() {
   const p = 1.618033988749895;
   final raw = <_V3>[
@@ -858,8 +754,8 @@ double _dist2(_V3 a, _V3 b) {
 }
 
 /// Tiny geometry holder (vertices + flat edge-pairs). Avoids relying on the
-/// Dart 3 records language feature so the file compiles under any SDK
-/// language version.
+/// Dart 3 records language feature so the file compiles under any SDK language
+/// version.
 class _Geom {
   final List<_V3> v;
   final List<int> e;

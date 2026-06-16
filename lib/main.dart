@@ -11,6 +11,8 @@ import 'color_art_screen.dart';
 import 'glitch_art.dart';
 import 'volume_scene.dart';
 import 'still_life.dart';
+import 'random_album.dart'; // "Random Album" — shuffled photo feed
+import 'slit_scan.dart'; // "Slit Scan" — live front-camera time-slice
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -57,7 +59,8 @@ class _MainScreenState extends State<MainScreen> {
   final MotionController _motion = MotionController();
 
   // Mode keys (also used as menu labels): 'Simple Clock', 'Celestial Clock',
-  // 'Color Art', 'Glitch Art', 'Volumes', 'Still Life'.
+  // 'Color Art', 'Glitch Art', 'Volumes', 'Still Life', 'Random Album',
+  // 'Slit Scan'.
   String _mode = 'Simple Clock';
   bool _is24Hour = true;
   DateTime _time = DateTime.now();
@@ -138,7 +141,8 @@ class _MainScreenState extends State<MainScreen> {
 
     // Simple Clock and Celestial Clock run a physics model in their own screens
     // (live 1:1 follow + inertia) and report each committed minute via onStep.
-    // Color Art and Glitch Art rely on the threshold-based commit here.
+    // The other modes (Color Art, Glitch Art, Volumes, Still Life, Random
+    // Album) rely on the threshold-based commit here.
     if (_mode == 'Simple Clock' || _mode == 'Celestial Clock') return;
     if (_committedThisGesture) return;
 
@@ -151,7 +155,7 @@ class _MainScreenState extends State<MainScreen> {
       if (kInvertScrollDirection) dir = -dir;
       _committedThisGesture = true;
       _advance(dir);
-      _motion.commit(dir); // lets Color Art / Glitch Art evolve on the step
+      _motion.commit(dir); // lets the art / album modes step on the commit
     }
   }
 
@@ -266,6 +270,10 @@ class _MainScreenState extends State<MainScreen> {
         return VolumeSceneScreen(motion: _motion);
       case 'Still Life':
         return StillLifeScreen(motion: _motion);
+      case 'Random Album':
+        return RandomAlbumScreen(motion: _motion);
+      case 'Slit Scan':
+        return SlitScanScreen(motion: _motion);
       case 'Simple Clock':
       default:
         return TimeScreen(
@@ -384,6 +392,12 @@ class _MenuOverlay extends StatelessWidget {
                     _tile('Still Life',
                         selected: currentMode == 'Still Life',
                         onTap: () => onSelect('Still Life')),
+                    _tile('Random Album',
+                        selected: currentMode == 'Random Album',
+                        onTap: () => onSelect('Random Album')),
+                    _tile('Slit Scan',
+                        selected: currentMode == 'Slit Scan',
+                        onTap: () => onSelect('Slit Scan')),
                     const Divider(
                         color: Colors.white24,
                         height: 1,
@@ -513,7 +527,12 @@ class AboutScreen extends StatelessWidget {
                   'of colour. Glitch is restless and electric, anything but calm. '
                   'Volumes rebuilds a luminous specimen of forms in three '
                   'dimensions that you can gently turn. Still Life arranges a '
-                  'small set of objects into a slowly turning tableau.',
+                  'small set of objects into a slowly turning tableau. Random '
+                  'Album shuffles endlessly through the photographs on the '
+                  'device, one new picture with every swipe. Slit Scan turns '
+                  'the camera on you: each swipe brushes a few vertical strips '
+                  'up to the present, so the picture becomes a living mosaic of '
+                  'everyone who has passed before it.',
                   style: body,
                 ),
                 SizedBox(height: 36),
