@@ -530,9 +530,9 @@ class AboutScreen extends StatelessWidget {
                   'small set of objects into a slowly turning tableau. Random '
                   'Album shuffles endlessly through the photographs on the '
                   'device, one new picture with every swipe. Slit Scan turns '
-                  'the camera on you: each swipe brushes a few vertical strips '
-                  'up to the present, so the picture becomes a living mosaic of '
-                  'everyone who has passed before it.',
+                  'the camera on you and paints with time: a still figure '
+                  'resolves sharply, while movement — or a swipe of the arm — '
+                  'pulls the image into luminous, drifting trails of light.',
                   style: body,
                 ),
                 SizedBox(height: 36),

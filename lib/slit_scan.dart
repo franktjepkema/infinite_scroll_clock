@@ -10,18 +10,20 @@ import 'package:flutter/scheduler.dart';
 
 import 'motion_controller.dart';
 
-/// Slit-Scan mode — a living mosaic of the viewers, built from the screen-side
-/// (front) camera.
+/// Slit-Scan mode — "Time Echoes".
 ///
-/// The screen is divided into a row of vertical strips. Each strip holds a
-/// *frozen* slice of the camera from whatever moment it was last refreshed. A
-/// swipe brushes a few random strips up to the present: each chosen strip wipes
-/// upward to reveal the live camera content captured at that instant. A longer
-/// or faster swipe brushes more strips. Between swipes the mosaic persists, so
-/// as different people pass in front of the work — and the mechanical arm keeps
-/// swiping — their fragments accumulate and blend across the columns. A still
-/// viewer slowly resolves into one coherent picture; movement, or a change of
-/// visitor, leaves the strips out of step, smeared across time.
+/// A live video-feedback piece built from the screen-side (front) camera. A
+/// persistent light-buffer holds the recent past: every frame it is dimmed
+/// slightly (so old light decays), nudged by the current scroll, and then the
+/// live camera frame is *added* on top. The result is long-exposure painting
+/// with time — a still figure resolves into a clean, luminous image, while any
+/// movement leaves glowing trails that fade like comet tails.
+///
+/// **The swipe drags time.** The whole light-buffer is displaced by the arm's
+/// motion — 1:1 during a drag, with momentum on release and a slow ambient
+/// drift at rest. So a swipe physically pulls the accumulated light into long
+/// streaks across the frame, then the live image re-asserts and the picture
+/// heals. Slow mechanical-arm swipes smear the light into deliberate ribbons.
 ///
 /// **Local only.** Frames are processed live and never stored or transmitted —
 /// nothing leaves the device.
@@ -38,46 +40,47 @@ enum _Status { initializing, denied, noCamera, ready }
 
 // --- Tuning ------------------------------------------------------------------
 
-/// Capture resolution. Slit-scan is abstract, so a modest preset is plenty and
-/// keeps the per-frame YUV→RGBA conversion cheap. Drop to `.low` if an older
-/// device stutters; raise to `.high` for crisper detail.
+/// Capture resolution. The effect is luminous and abstract, so a modest preset
+/// is plenty and keeps the per-frame YUV→RGBA conversion cheap. Drop to `.low`
+/// if an older device stutters.
 const ResolutionPreset _kResolution = ResolutionPreset.medium;
 
 /// Minimum interval between camera-frame conversions (ms). The display runs at
 /// 60 fps regardless; the camera only needs to refresh ~25×/s.
 const int _kConvertMinIntervalMs = 40;
 
-/// Working resolution of the mosaic (longest edge, px). Upscaled to the screen.
+/// Working resolution of the light-buffer (longest edge, px); upscaled to fill.
 const int _kAccumMaxEdge = 1000;
 
-/// Number of vertical strips the picture is divided into.
-const int _kSliceCount = 20;
+/// How much of the previous buffer survives each frame (0..1). Higher = longer,
+/// silkier trails (and a slower heal-back); lower = snappier, shorter trails.
+const double _kPersistence = 0.92;
 
-/// How long a strip takes to wipe up to its new content.
-const double _kStrokeDurationS = 0.55;
+/// Light-buffer motion (accumulator px / s), reused from the Color Art scroll.
+const double _kAmbientSpeed = 8.0; // gentle drift at rest, so it's never frozen
+const double _kAmbientTurn = 0.05; // how fast that drift's direction wanders
+const double _kInertiaTau = 1.3; // release-momentum decay
+const double _kMaxReleaseSpeed = 3000.0; // cap on fling momentum
 
-/// A new strip is brushed for every this-fraction-of-the-screen swiped, so a
-/// short arm swipe paints a few strips and a long one paints many.
-const double _kStrokeSpacingFrac = 0.10;
+/// Optional feedback zoom per frame (1.0 = off). Slightly above 1 gives a
+/// gentle tunnelling echo; below 1 pulls trails inward.
+const double _kFeedbackZoom = 1.0;
 
-/// Cap on simultaneously-animating strips.
-const int _kMaxConcurrentStrokes = 12;
+/// Render as luminous white-on-black (matches the rest of the series) instead
+/// of full colour.
+const bool _kMonochrome = false;
 
-/// Front cameras are normally shown mirrored, like a bathroom mirror — natural
-/// for someone watching themselves. Set false for a "true" (un-mirrored) view.
+/// Front cameras are normally shown mirrored, like a bathroom mirror.
 const bool _kMirror = true;
 
-/// Fine-tune for the captured frame's rotation. The base rotation is derived
-/// from the sensor + device orientation; if the picture is sideways or upside
-/// down, change this 0 → 1 → 2 → 3 until it stands upright. (2 = 180°, the fix
-/// for an upside-down image.)
+/// Rotation fine-tune. 2 = 180° (the fix for an upside-down sensor). If the
+/// picture is sideways, try 1 or 3.
 const int _kExtraQuarterTurns = 2;
 
 class _SlitScanScreenState extends State<SlitScanScreen>
     with TickerProviderStateMixin, WidgetsBindingObserver {
   late final Ticker _ticker;
   final ValueNotifier<int> _frame = ValueNotifier<int>(0);
-  final math.Random _rng = math.Random();
 
   // --- Camera ---------------------------------------------------------------
   _Status _status = _Status.initializing;
@@ -90,24 +93,26 @@ class _SlitScanScreenState extends State<SlitScanScreen>
   bool _converting = false;
   int _lastConvertMs = 0;
 
-  // Retry watchdog: while the camera isn't ready, re-attempt init so it
-  // recovers on its own once permission is granted — no app restart needed.
-  Timer? _retry;
+  Timer? _retry; // re-init watchdog until the camera is ready
 
-  // --- Mosaic ----------------------------------------------------------------
-  final _Surface _surface = _Surface(); // baked, settled mosaic
-  final List<_Stroke> _strokes = <_Stroke>[]; // strips currently wiping in
+  // --- Light buffer ---------------------------------------------------------
+  final _Surface _surface = _Surface();
   int _accumW = 0, _accumH = 0;
-  bool _seeded = false; // first live frame painted into all strips yet?
 
-  // --- Gesture ---------------------------------------------------------------
-  double _swipeAccum = 0.0; // swipe distance since the last brushed strip
-  int _spawnedThisGesture = 0;
+  // The previous buffer + its picture must stay alive until the new buffer has
+  // actually been painted (toImageSync rasterises lazily). We free them one
+  // frame later — disposing them immediately is what made the image go dark.
+  ui.Image? _toDisposeImg;
+  ui.Picture? _toDisposePic;
+
+  // --- Scroll → displacement -------------------------------------------------
+  Offset _pendingDisp = Offset.zero; // live 1:1 drag, consumed each tick
+  Offset _camVel = Offset.zero; // release momentum (accumulator px/s)
+  double _ambientAngle = 0.0;
   bool _wasDragging = false;
   int _lastUpdateTick = -1;
 
   double _prevElapsedS = 0.0;
-  double _nowS = 0.0;
 
   // --- Layout ---------------------------------------------------------------
   Size _size = Size.zero;
@@ -118,6 +123,7 @@ class _SlitScanScreenState extends State<SlitScanScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.motion.addListener(_onMotion);
+    _ambientAngle = math.Random().nextDouble() * 2 * math.pi;
     _ticker = createTicker(_onTick)..start();
     _initCamera();
     _startRetry();
@@ -130,7 +136,7 @@ class _SlitScanScreenState extends State<SlitScanScreen>
     if (s != _size) {
       _size = s;
       _isLandscape = s.width > s.height;
-      _resizeMosaic();
+      _resizeBuffer();
     }
   }
 
@@ -145,9 +151,6 @@ class _SlitScanScreenState extends State<SlitScanScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // Release the camera only when truly backgrounded — NOT on the brief
-    // `inactive` flash the permission dialog causes (which would tear the
-    // camera down mid-initialise).
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.detached) {
       _disposeCamera();
@@ -166,11 +169,10 @@ class _SlitScanScreenState extends State<SlitScanScreen>
     _retry?.cancel();
     _ticker.dispose();
     _disposeCamera();
-    for (final s in _strokes) {
-      s.strip.dispose();
-    }
     _camImage?.dispose();
     _surface.image?.dispose();
+    _toDisposeImg?.dispose();
+    _toDisposePic?.dispose();
     _frame.dispose();
     super.dispose();
   }
@@ -344,9 +346,9 @@ class _SlitScanScreenState extends State<SlitScanScreen>
     return out;
   }
 
-  // --- Mosaic geometry / seeding --------------------------------------------
+  // --- Buffer geometry -------------------------------------------------------
 
-  void _resizeMosaic() {
+  void _resizeBuffer() {
     if (_size.width <= 0 || _size.height <= 0) return;
     final longest = math.max(_size.width, _size.height);
     final scale = longest > _kAccumMaxEdge ? _kAccumMaxEdge / longest : 1.0;
@@ -355,7 +357,6 @@ class _SlitScanScreenState extends State<SlitScanScreen>
     if (w == _accumW && h == _accumH && _surface.image != null) return;
     _accumW = w;
     _accumH = h;
-    _seeded = false; // re-seed from the next live frame at the new size
     _paintBlack();
   }
 
@@ -372,24 +373,61 @@ class _SlitScanScreenState extends State<SlitScanScreen>
     _surface.image = img;
   }
 
-  /// Paint the current live frame across the whole mosaic, so the mode opens on
-  /// a coherent picture that then diverges strip-by-strip as it's brushed.
-  void _seedFrom(ui.Image cam) {
+  // --- The feedback step -----------------------------------------------------
+
+  void _composite(Offset disp) {
+    // Free last frame's source + picture now that the new buffer they fed has
+    // already been painted (one-frame deferral keeps the feedback alive).
+    _toDisposePic?.dispose();
+    _toDisposePic = null;
+    _toDisposeImg?.dispose();
+    _toDisposeImg = null;
+
+    final aw = _accumW.toDouble(), ah = _accumH.toDouble();
     final rec = ui.PictureRecorder();
     final c = Canvas(rec);
-    c.drawRect(Rect.fromLTWH(0, 0, _accumW.toDouble(), _accumH.toDouble()),
-        Paint()..color = Colors.black);
-    _drawFrameCover(c, cam);
+
+    // Opaque black base so any edge the displacement uncovers stays clean.
+    c.drawRect(Rect.fromLTWH(0, 0, aw, ah), Paint()..color = Colors.black);
+
+    // Previous light, displaced (and optionally zoomed) — this is the "echo".
+    final prev = _surface.image;
+    if (prev != null) {
+      c.save();
+      if (_kFeedbackZoom != 1.0) {
+        c.translate(aw / 2, ah / 2);
+        c.scale(_kFeedbackZoom);
+        c.translate(-aw / 2, -ah / 2);
+      }
+      c.translate(disp.dx, disp.dy);
+      c.drawImage(prev, Offset.zero, Paint()..filterQuality = FilterQuality.low);
+      c.restore();
+    }
+
+    // Decay the echo: multiply everything so far by _kPersistence (a black veil
+    // at alpha 1−persistence does exactly that under srcOver).
+    c.drawRect(Rect.fromLTWH(0, 0, aw, ah),
+        Paint()..color = Colors.black.withValues(alpha: 1.0 - _kPersistence));
+
+    // Draw the live frame at FULL brightness, kept wherever it is brighter than
+    // the fading echo (BlendMode.lighten). Result: a clear, bright live image,
+    // with the decaying ghost glowing through as trails — never a dark frame.
+    final cam = _camImage;
+    if (cam != null) _drawFrameLighten(c, cam);
+
     final pic = rec.endRecording();
     final img = pic.toImageSync(_accumW, _accumH);
-    pic.dispose();
-    _surface.image?.dispose();
     _surface.image = img;
+
+    // Keep prev + pic alive one more frame (see fields above).
+    _toDisposeImg = prev;
+    _toDisposePic = pic;
   }
 
-  /// Draw the live frame to fill the whole mosaic, centred, cover-fit, rotated
-  /// for the sensor/device, and mirrored for the front camera.
-  void _drawFrameCover(Canvas canvas, ui.Image cam) {
+  /// Draw the live frame to fill the buffer — centred, cover-fit, rotated for
+  /// the sensor/device, mirrored for the front camera — at full brightness,
+  /// blended so it keeps the lighter of (live, fading echo).
+  void _drawFrameLighten(Canvas canvas, ui.Image cam) {
     final aw = _accumW.toDouble(), ah = _accumH.toDouble();
     final deviceDeg = _isLandscape ? 90 : 0;
     var qt =
@@ -401,100 +439,53 @@ class _SlitScanScreenState extends State<SlitScanScreen>
     final cover =
         (effW <= 0 || effH <= 0) ? 1.0 : math.max(aw / effW, ah / effH);
 
+    final paint = Paint()
+      ..filterQuality = FilterQuality.low
+      ..blendMode = BlendMode.lighten
+      ..colorFilter = _lookFilter();
+
     canvas.save();
     canvas.translate(aw / 2, ah / 2);
     canvas.rotate(qt * math.pi / 2);
     if (_kMirror) canvas.scale(-1.0, 1.0);
     canvas.scale(cover, cover);
-    canvas.drawImage(cam, Offset(-_camW / 2, -_camH / 2),
-        Paint()..filterQuality = FilterQuality.low);
+    canvas.drawImage(cam, Offset(-_camW / 2, -_camH / 2), paint);
     canvas.restore();
   }
 
-  // --- Brushing strips -------------------------------------------------------
-
-  double get _sliceW => _accumW / _kSliceCount;
-
-  /// Capture the current live frame for just strip [index] as a standalone
-  /// strip image (so it stays fixed even as new camera frames arrive).
-  ui.Image _captureSlice(int index, ui.Image cam) {
-    final sliceW = _sliceW;
-    final x0 = index * sliceW;
-    final wPx = sliceW.ceil().clamp(1, _accumW).toInt();
-    final rec = ui.PictureRecorder();
-    final c = Canvas(rec);
-    c.clipRect(Rect.fromLTWH(0, 0, sliceW, _accumH.toDouble()));
-    c.translate(-x0, 0);
-    _drawFrameCover(c, cam);
-    final pic = rec.endRecording();
-    final img = pic.toImageSync(wPx, _accumH);
-    pic.dispose();
-    return img;
-  }
-
-  /// Brush one random strip (not already animating) up to the live frame.
-  void _brushStrip() {
-    final cam = _camImage;
-    if (cam == null || _accumW <= 0 || !_seeded) return;
-    if (_strokes.length >= _kMaxConcurrentStrokes) return;
-
-    final busy = <int>{for (final s in _strokes) s.index};
-    if (busy.length >= _kSliceCount) return;
-
-    int idx = _rng.nextInt(_kSliceCount);
-    var tries = 0;
-    while (busy.contains(idx) && tries < 24) {
-      idx = _rng.nextInt(_kSliceCount);
-      tries++;
-    }
-    if (busy.contains(idx)) return;
-
-    _strokes.add(_Stroke(
-      index: idx,
-      strip: _captureSlice(idx, cam),
-      startS: _nowS,
-    ));
-    _spawnedThisGesture++;
-  }
-
-  /// Permanently composite a finished strip into the settled mosaic.
-  void _bake(_Stroke s) {
-    final sliceW = _sliceW;
-    final x0 = s.index * sliceW;
-    final rec = ui.PictureRecorder();
-    final c = Canvas(rec);
-    if (_surface.image != null) c.drawImage(_surface.image!, Offset.zero, Paint());
-    final src = Rect.fromLTWH(
-        0, 0, s.strip.width.toDouble(), s.strip.height.toDouble());
-    final dst = Rect.fromLTWH(x0, 0, sliceW, _accumH.toDouble());
-    c.drawImageRect(s.strip, src, dst, Paint());
-    final pic = rec.endRecording();
-    final img = pic.toImageSync(_accumW, _accumH);
-    pic.dispose();
-    _surface.image?.dispose();
-    _surface.image = img;
+  /// Optional white-on-black look: collapse the frame to luminance.
+  ColorFilter? _lookFilter() {
+    if (!_kMonochrome) return null;
+    const r = 0.299, g = 0.587, b = 0.114;
+    return const ColorFilter.matrix(<double>[
+      r, g, b, 0, 0, //
+      r, g, b, 0, 0, //
+      r, g, b, 0, 0, //
+      0, 0, 0, 1, 0, //
+    ]);
   }
 
   // --- Per-frame -------------------------------------------------------------
 
   void _onTick(Duration elapsed) {
-    _nowS = elapsed.inMicroseconds / 1e6;
-    _prevElapsedS = _nowS;
+    final nowS = elapsed.inMicroseconds / 1e6;
+    final dt = (nowS - _prevElapsedS).clamp(0.0, 0.05).toDouble();
+    _prevElapsedS = nowS;
 
     if (_status == _Status.ready && _accumW > 0 && _camImage != null) {
-      if (!_seeded) {
-        _seedFrom(_camImage!);
-        _seeded = true;
-      }
-      // Bake and retire any strokes that have finished wiping in.
-      for (var i = _strokes.length - 1; i >= 0; i--) {
-        final s = _strokes[i];
-        if (_nowS - s.startS >= _kStrokeDurationS) {
-          _bake(s);
-          s.strip.dispose();
-          _strokes.removeAt(i);
-        }
-      }
+      // Ambient current keeps the light gently flowing even at rest.
+      _ambientAngle += dt * _kAmbientTurn;
+      final ambient = Offset.fromDirection(_ambientAngle, _kAmbientSpeed);
+
+      var disp = _pendingDisp + (ambient + _camVel) * dt;
+      _pendingDisp = Offset.zero;
+      _camVel = _camVel * math.exp(-dt / _kInertiaTau);
+
+      // Never displace more than half the buffer in one frame.
+      final maxStep = 0.5 * math.min(_accumW, _accumH);
+      if (disp.distance > maxStep) disp = disp / disp.distance * maxStep;
+
+      _composite(disp);
     }
 
     _frame.value += 1;
@@ -504,30 +495,26 @@ class _SlitScanScreenState extends State<SlitScanScreen>
 
   void _onMotion() {
     final m = widget.motion;
+    if (_size.width <= 0 || _accumW <= 0) return;
+
+    // Map screen-space gesture px onto buffer-space px.
+    final scale = _accumW / _size.width;
 
     if (m.isDragging && !_wasDragging) {
       _wasDragging = true;
-      _swipeAccum = 0.0;
-      _spawnedThisGesture = 0;
-      _brushStrip(); // immediate feedback on touch-down
+      _camVel = Offset.zero; // the drag itself drives motion 1:1
     } else if (!m.isDragging && _wasDragging) {
       _wasDragging = false;
-      if (_spawnedThisGesture == 0) _brushStrip(); // ensure a short tap paints
+      var v = m.velocity * scale;
+      if (v.distance > _kMaxReleaseSpeed) {
+        v = v / v.distance * _kMaxReleaseSpeed;
+      }
+      _camVel = v;
     }
 
-    // Accumulate total swipe travel (any direction) and brush a strip each time
-    // the arm has moved another step's worth.
     if (m.isDragging && m.updateTick != _lastUpdateTick) {
       _lastUpdateTick = m.updateTick;
-      _swipeAccum += m.liveDelta.distance;
-      final screenDim = _isLandscape ? _size.width : _size.height;
-      final spacing = _kStrokeSpacingFrac * (screenDim <= 0 ? 1000.0 : screenDim);
-      var guard = 0;
-      while (_swipeAccum >= spacing && guard < _kSliceCount) {
-        _swipeAccum -= spacing;
-        _brushStrip();
-        guard++;
-      }
+      _pendingDisp += m.liveDelta * scale;
     }
     // Commits are ignored on purpose: this mode is purely visual.
   }
@@ -546,7 +533,7 @@ class _SlitScanScreenState extends State<SlitScanScreen>
               case _Status.ready:
                 return CustomPaint(
                   size: Size.infinite,
-                  painter: _MosaicPainter(state: this, repaint: _frame),
+                  painter: _EchoPainter(surface: _surface, repaint: _frame),
                 );
               case _Status.initializing:
                 return const SizedBox.expand();
@@ -565,62 +552,30 @@ class _SlitScanScreenState extends State<SlitScanScreen>
   }
 }
 
-/// One strip currently wiping up to its new captured content.
-class _Stroke {
-  final int index;
-  final ui.Image strip;
-  final double startS;
-  _Stroke({required this.index, required this.strip, required this.startS});
-}
-
-/// Mutable handle for the settled mosaic image.
+/// Mutable handle for the light buffer.
 class _Surface {
   ui.Image? image;
 }
 
-class _MosaicPainter extends CustomPainter {
-  final _SlitScanScreenState state;
+class _EchoPainter extends CustomPainter {
+  final _Surface surface;
   final Listenable repaint;
-  _MosaicPainter({required this.state, required this.repaint})
+  _EchoPainter({required this.surface, required this.repaint})
       : super(repaint: repaint);
 
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(Offset.zero & size, Paint()..color = Colors.black);
-
-    // The settled mosaic, upscaled to the screen.
-    final base = state._surface.image;
-    if (base != null) {
-      final src =
-          Rect.fromLTWH(0, 0, base.width.toDouble(), base.height.toDouble());
-      canvas.drawImageRect(base, src, Offset.zero & size,
-          Paint()..filterQuality = FilterQuality.medium);
-    }
-
-    // Active strokes: each reveals its strip from the bottom up.
-    final sliceWScreen = size.width / _kSliceCount;
-    for (final s in state._strokes) {
-      final p = ((state._nowS - s.startS) / _kStrokeDurationS)
-          .clamp(0.0, 1.0)
-          .toDouble();
-      if (p <= 0) continue;
-      final strip = s.strip;
-      final sh = strip.height.toDouble();
-      final sw = strip.width.toDouble();
-
-      // Reveal the bottom fraction p (a brushstroke travelling upward).
-      final srcTop = sh * (1.0 - p);
-      final src = Rect.fromLTWH(0, srcTop, sw, sh - srcTop);
-      final dstH = size.height * p;
-      final dst = Rect.fromLTWH(
-          s.index * sliceWScreen, size.height - dstH, sliceWScreen, dstH);
-      canvas.drawImageRect(
-          strip, src, dst, Paint()..filterQuality = FilterQuality.medium);
-    }
+    final img = surface.image;
+    if (img == null) return;
+    final src =
+        Rect.fromLTWH(0, 0, img.width.toDouble(), img.height.toDouble());
+    canvas.drawImageRect(img, src, Offset.zero & size,
+        Paint()..filterQuality = FilterQuality.medium);
   }
 
   @override
-  bool shouldRepaint(covariant _MosaicPainter old) => true;
+  bool shouldRepaint(covariant _EchoPainter old) => true;
 }
 
 /// Minimal centred status text in the app's typographic voice.
